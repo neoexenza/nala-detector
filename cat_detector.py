@@ -10,6 +10,8 @@ import io
 import json
 import time
 import logging
+import threading
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -36,6 +38,12 @@ RESULT_TOPIC = os.environ.get("RESULT_TOPIC", "nala/detection/result")
 SNAPSHOT_REQUEST_TOPIC = os.environ.get(
     "SNAPSHOT_REQUEST_TOPIC",
     "ring/0edbd740-1b1f-48f4-a72d-512697d5764f/camera/ac9fc38ba649/take_snapshot/command"
+)
+
+# RTSP stream for frame grabbing during motion
+RTSP_URL = os.environ.get(
+    "RTSP_URL",
+    "rtsp://192.168.0.200:8554/ac9fc38ba649_live"
 )
 
 # Detection settings
@@ -65,7 +73,6 @@ class NalaDetector:
         self.last_notify_time = 0
         self.model = self._load_model()
         self.mqtt_client = None
-        self._waiting_for_snapshot = False
 
         # Ensure data directories exist
         if COLLECT_DATA:
@@ -98,6 +105,7 @@ class NalaDetector:
                 for box in result.boxes:
                     cls_id = int(box.cls[0])
                     conf = float(box.conf[0])
+
                     if cls_id == CAT_CLASS_ID and conf >= CONFIDENCE_THRESHOLD:
                         cat_detections.append({
                             "confidence": round(conf, 3),
@@ -156,34 +164,51 @@ class NalaDetector:
         else:
             logger.error(f"MQTT connection failed: rc={rc}")
 
-    def on_motion(self, client, userdata, msg):
-        """Handle motion event — request a snapshot."""
-        payload = msg.payload.decode("utf-8", errors="ignore").strip()
-        if payload.upper() == "ON":
-            logger.info("Motion detected, requesting snapshot...")
-            self._waiting_for_snapshot = True
-            client.publish(SNAPSHOT_REQUEST_TOPIC, "ON")
+    def _grab_rtsp_frame(self, client):
+        """Grab a frame from the RTSP live stream using ffmpeg."""
+        # Small delay to let the stream stabilise after motion triggers
+        time.sleep(3)
+        logger.info(f"Grabbing frame from RTSP stream...")
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-rtsp_transport", "tcp",
+                    "-i", RTSP_URL,
+                    "-frames:v", "1",
+                    "-f", "image2",
+                    "-q:v", "2",
+                    "/tmp/motion_frame.jpg"
+                ],
+                capture_output=True, timeout=15
+            )
+            if result.returncode == 0 and os.path.exists("/tmp/motion_frame.jpg"):
+                with open("/tmp/motion_frame.jpg", "rb") as f:
+                    image_bytes = f.read()
+                if len(image_bytes) > 1000:
+                    logger.info(f"Got RTSP frame ({len(image_bytes)} bytes)")
+                    self._process_frame(client, image_bytes)
+                    return
+            logger.warning(f"RTSP frame grab failed (rc={result.returncode})")
+        except subprocess.TimeoutExpired:
+            logger.warning("RTSP frame grab timed out (camera may not be streaming)")
+        except Exception as e:
+            logger.error(f"RTSP error: {e}")
 
-    def on_snapshot(self, client, userdata, msg):
-        """Handle incoming snapshot image."""
-        image_bytes = msg.payload
-        if len(image_bytes) < 1000:
-            logger.warning(f"Received too-small payload ({len(image_bytes)} bytes), skipping")
-            return
+        # Fallback: request on-demand snapshot after recording finishes
+        logger.info("Falling back to on-demand snapshot (waiting for recording to end)...")
+        time.sleep(25)
+        client.publish(SNAPSHOT_REQUEST_TOPIC, "PRESS")
 
+    def _process_frame(self, client, image_bytes):
+        """Run detection on a frame and publish results."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        logger.info(f"Received snapshot ({len(image_bytes)} bytes), running detection...")
-
         is_cat, confidence, details = self.detect_cat(image_bytes)
-
-        # Save for training regardless of result
         self.save_training_data(image_bytes, is_cat, timestamp)
 
         if is_cat:
-            logger.info(f"🐱 CAT DETECTED! Confidence: {confidence:.1%}")
+            logger.info(f"CAT DETECTED! Confidence: {confidence:.1%}")
             self.save_detection(image_bytes, details, timestamp)
-
-            # Publish result to MQTT
             result_payload = json.dumps({
                 "detected": True,
                 "confidence": confidence,
@@ -200,7 +225,28 @@ class NalaDetector:
             })
             client.publish(RESULT_TOPIC, result_payload, retain=True)
 
-        self._waiting_for_snapshot = False
+    def on_motion(self, client, userdata, msg):
+        """Handle motion event - grab frame from RTSP live stream."""
+        payload = msg.payload.decode("utf-8", errors="ignore").strip()
+        if payload.upper() == "ON":
+            logger.info("Motion detected! Grabbing live frame...")
+            # Camera is recording = RTSP stream is active. Grab a frame directly.
+            t = threading.Thread(
+                target=self._grab_rtsp_frame,
+                args=(client,),
+                daemon=True
+            )
+            t.start()
+
+    def on_snapshot(self, client, userdata, msg):
+        """Handle incoming snapshot image from MQTT (interval or on-demand)."""
+        image_bytes = msg.payload
+        if len(image_bytes) < 1000:
+            logger.warning(f"Received too-small payload ({len(image_bytes)} bytes), skipping")
+            return
+
+        logger.info(f"Received MQTT snapshot ({len(image_bytes)} bytes)")
+        self._process_frame(client, image_bytes)
 
     def on_message(self, client, userdata, msg):
         """Route messages to appropriate handler."""
@@ -213,6 +259,7 @@ class NalaDetector:
         """Main loop."""
         logger.info("Starting Nala Cat Detector...")
         logger.info(f"MQTT: {MQTT_HOST}:{MQTT_PORT}")
+        logger.info(f"RTSP: {RTSP_URL}")
         logger.info(f"Model: {CUSTOM_MODEL_PATH if os.path.exists(CUSTOM_MODEL_PATH) else MODEL_PATH}")
         logger.info(f"Confidence threshold: {CONFIDENCE_THRESHOLD}")
         logger.info(f"Notify cooldown: {NOTIFY_COOLDOWN}s")
