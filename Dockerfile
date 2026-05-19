@@ -12,7 +12,8 @@ RUN pip install --no-cache-dir \
     ultralytics==8.3.* \
     opencv-python-headless \
     paho-mqtt \
-    Pillow
+    Pillow \
+    flask
 
 # Download YOLOv8n model at build time
 RUN mkdir -p /models && \
@@ -22,6 +23,7 @@ RUN mkdir -p /models && \
 
 COPY cat_detector.py /app/cat_detector.py
 COPY train.py /app/train.py
+COPY web_ui.py /app/web_ui.py
 
 WORKDIR /app
 
