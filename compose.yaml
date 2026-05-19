@@ -1,0 +1,29 @@
+services:
+
+  nala-detector:
+    container_name: nala-detector
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+      - ./models:/models
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  training:
+    container_name: nala-training
+    build: .
+    profiles:
+      - training
+    env_file: .env
+    environment:
+      - TRAIN_EPOCHS=50
+      - TRAIN_IMGSZ=640
+      - TRAIN_BATCH=4
+    volumes:
+      - ./data:/data
+      - ./models:/models
+    entrypoint: ["python3", "/app/train.py"]
