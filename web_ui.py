@@ -13,8 +13,11 @@ from flask import Flask, render_template_string, jsonify, request, send_file
 app = Flask(__name__)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
-CAT_DIR = os.path.join(DATA_DIR, "training", "cat")
-NO_CAT_DIR = os.path.join(DATA_DIR, "training", "no_cat")
+FOLDERS = {
+    "cat": os.path.join(DATA_DIR, "training", "cat"),
+    "other_cat": os.path.join(DATA_DIR, "training", "other_cat"),
+    "no_cat": os.path.join(DATA_DIR, "training", "no_cat"),
+}
 
 training_status = {"running": False, "last_result": None}
 
@@ -53,7 +56,8 @@ h1 { margin-bottom: 0.5rem; }
 <div class="status" id="training-status" style="display:none"></div>
 
 <div class="tabs">
-  <div class="tab active" onclick="switchTab('cat')">Cat <span class="count" id="cat-count">0</span></div>
+  <div class="tab active" onclick="switchTab('cat')">Nala <span class="count" id="cat-count">0</span></div>
+  <div class="tab" onclick="switchTab('other_cat')">Other Cat <span class="count" id="other-cat-count">0</span></div>
   <div class="tab" onclick="switchTab('no_cat')">No Cat <span class="count" id="no-cat-count">0</span></div>
 </div>
 
@@ -61,7 +65,7 @@ h1 { margin-bottom: 0.5rem; }
 
 <div class="actions">
   <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
-  <button class="btn btn-move" onclick="moveSelected()">Move to <span id="move-target">no_cat</span></button>
+  <span id="move-buttons"></span>
   <button class="btn btn-primary" onclick="selectAll()">Select All</button>
   <button class="btn btn-primary" onclick="deselectAll()">Deselect All</button>
   <button class="btn btn-primary" onclick="startTraining()" id="train-btn">Start Training</button>
@@ -75,14 +79,12 @@ let images = [];
 async function load() {
   const r = await fetch(`/api/images/${currentTab}`);
   images = await r.json();
-  document.getElementById('cat-count').textContent = currentTab === 'cat' ? images.length : document.getElementById('cat-count').textContent;
-  document.getElementById('no-cat-count').textContent = currentTab === 'no_cat' ? images.length : document.getElementById('no-cat-count').textContent;
-  // load both counts
   const rc = await fetch('/api/stats');
   const stats = await rc.json();
   document.getElementById('cat-count').textContent = stats.cat;
+  document.getElementById('other-cat-count').textContent = stats.other_cat;
   document.getElementById('no-cat-count').textContent = stats.no_cat;
-  document.getElementById('stats').textContent = `${stats.cat} cat images, ${stats.no_cat} no-cat images, ${stats.detections} detections logged`;
+  document.getElementById('stats').textContent = `${stats.cat} Nala, ${stats.other_cat} other cats, ${stats.no_cat} no-cat, ${stats.detections} detections`;
   render();
   checkTraining();
 }
@@ -95,7 +97,11 @@ function render() {
       <div class="name">${img}</div>
     </div>
   `).join('');
-  document.getElementById('move-target').textContent = currentTab === 'cat' ? 'no_cat' : 'cat';
+  // Build move buttons
+  const folders = ['cat', 'other_cat', 'no_cat'].filter(f => f !== currentTab);
+  document.getElementById('move-buttons').innerHTML = folders.map(f => 
+    `<button class="btn btn-move" onclick="moveSelected('${f}')">${f === 'cat' ? 'Nala' : f === 'other_cat' ? 'Other Cat' : 'No Cat'}</button>`
+  ).join('');
 }
 
 function toggle(img) { selected.has(img) ? selected.delete(img) : selected.add(img); render(); }
@@ -105,8 +111,9 @@ function deselectAll() { selected.clear(); render(); }
 function switchTab(tab) {
   currentTab = tab;
   selected.clear();
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab')[tab === 'cat' ? 0 : 1].classList.add('active');
+  document.querySelectorAll('.tab').forEach((t, i) => {
+    t.classList.toggle('active', ['cat','other_cat','no_cat'][i] === tab);
+  });
   load();
 }
 
@@ -118,9 +125,8 @@ async function deleteSelected() {
   load();
 }
 
-async function moveSelected() {
+async function moveSelected(target) {
   if (!selected.size) return;
-  const target = currentTab === 'cat' ? 'no_cat' : 'cat';
   await fetch('/api/move', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({from: currentTab, to: target, files: [...selected]}) });
   selected.clear();
   load();
@@ -154,17 +160,18 @@ def index():
 
 @app.route("/api/stats")
 def stats():
-    cat_count = len(list(Path(CAT_DIR).glob("*.jpg"))) if os.path.exists(CAT_DIR) else 0
-    no_cat_count = len(list(Path(NO_CAT_DIR).glob("*.jpg"))) if os.path.exists(NO_CAT_DIR) else 0
+    cat_count = len(list(Path(FOLDERS["cat"]).glob("*.jpg"))) if os.path.exists(FOLDERS["cat"]) else 0
+    other_cat_count = len(list(Path(FOLDERS["other_cat"]).glob("*.jpg"))) if os.path.exists(FOLDERS["other_cat"]) else 0
+    no_cat_count = len(list(Path(FOLDERS["no_cat"]).glob("*.jpg"))) if os.path.exists(FOLDERS["no_cat"]) else 0
     det_dir = os.path.join(DATA_DIR, "detections")
     det_count = len(list(Path(det_dir).glob("*.json"))) if os.path.exists(det_dir) else 0
-    return jsonify({"cat": cat_count, "no_cat": no_cat_count, "detections": det_count})
+    return jsonify({"cat": cat_count, "other_cat": other_cat_count, "no_cat": no_cat_count, "detections": det_count})
 
 @app.route("/api/images/<folder>")
 def list_images(folder):
-    if folder not in ("cat", "no_cat"):
+    if folder not in FOLDERS:
         return jsonify([])
-    dir_path = CAT_DIR if folder == "cat" else NO_CAT_DIR
+    dir_path = FOLDERS[folder]
     if not os.path.exists(dir_path):
         return jsonify([])
     files = sorted([f for f in os.listdir(dir_path) if f.endswith(".jpg")], reverse=True)
@@ -172,9 +179,9 @@ def list_images(folder):
 
 @app.route("/api/image/<folder>/<filename>")
 def get_image(folder, filename):
-    if folder not in ("cat", "no_cat"):
+    if folder not in FOLDERS:
         return "not found", 404
-    dir_path = CAT_DIR if folder == "cat" else NO_CAT_DIR
+    dir_path = FOLDERS[folder]
     filepath = os.path.join(dir_path, filename)
     if not os.path.exists(filepath) or ".." in filename:
         return "not found", 404
@@ -185,9 +192,9 @@ def delete_images():
     data = request.json
     folder = data.get("folder")
     files = data.get("files", [])
-    if folder not in ("cat", "no_cat"):
+    if folder not in FOLDERS:
         return jsonify({"error": "bad folder"}), 400
-    dir_path = CAT_DIR if folder == "cat" else NO_CAT_DIR
+    dir_path = FOLDERS[folder]
     deleted = 0
     for f in files:
         if ".." in f:
@@ -204,10 +211,10 @@ def move_images():
     src_folder = data.get("from")
     dst_folder = data.get("to")
     files = data.get("files", [])
-    if src_folder not in ("cat", "no_cat") or dst_folder not in ("cat", "no_cat"):
+    if src_folder not in FOLDERS or dst_folder not in FOLDERS:
         return jsonify({"error": "bad folder"}), 400
-    src_dir = CAT_DIR if src_folder == "cat" else NO_CAT_DIR
-    dst_dir = CAT_DIR if dst_folder == "cat" else NO_CAT_DIR
+    src_dir = FOLDERS[src_folder]
+    dst_dir = FOLDERS[dst_folder]
     os.makedirs(dst_dir, exist_ok=True)
     moved = 0
     for f in files:

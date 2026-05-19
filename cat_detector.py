@@ -51,6 +51,7 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.4"))
 CAT_CLASS_ID = 15  # COCO class ID for 'cat'
 MODEL_PATH = os.environ.get("MODEL_PATH", "/models/yolov8n.pt")
 CUSTOM_MODEL_PATH = os.environ.get("CUSTOM_MODEL_PATH", "/models/nala_custom.pt")
+USE_CLASSIFICATION = False  # Set True when custom model is a classifier
 
 # Data collection for fine-tuning
 COLLECT_DATA = os.environ.get("COLLECT_DATA", "true").lower() == "true"
@@ -82,11 +83,14 @@ class NalaDetector:
 
     def _load_model(self):
         """Load custom model if available, otherwise fall back to pre-trained."""
+        global USE_CLASSIFICATION
         if os.path.exists(CUSTOM_MODEL_PATH):
-            logger.info(f"Loading custom model: {CUSTOM_MODEL_PATH}")
+            logger.info(f"Loading custom classification model: {CUSTOM_MODEL_PATH}")
+            USE_CLASSIFICATION = True
             return YOLO(CUSTOM_MODEL_PATH)
         else:
-            logger.info(f"Loading pre-trained model: {MODEL_PATH}")
+            logger.info(f"Loading pre-trained detection model: {MODEL_PATH}")
+            USE_CLASSIFICATION = False
             return YOLO(MODEL_PATH)
 
     def reload_model(self):
@@ -95,27 +99,39 @@ class NalaDetector:
         logger.info("Model reloaded")
 
     def detect_cat(self, image_bytes):
-        """Run inference on image bytes. Returns (is_cat, confidence, details)."""
+        """Run inference on image bytes. Returns (is_nala, confidence, details)."""
         try:
             image = Image.open(io.BytesIO(image_bytes))
             results = self.model(image, verbose=False)
 
-            cat_detections = []
-            for result in results:
-                for box in result.boxes:
-                    cls_id = int(box.cls[0])
-                    conf = float(box.conf[0])
+            if USE_CLASSIFICATION:
+                # Classification model: returns class probabilities
+                for result in results:
+                    probs = result.probs
+                    top_class = result.names[probs.top1]
+                    top_conf = float(probs.top1conf)
 
-                    if cls_id == CAT_CLASS_ID and conf >= CONFIDENCE_THRESHOLD:
-                        cat_detections.append({
-                            "confidence": round(conf, 3),
-                            "bbox": [round(x, 1) for x in box.xyxy[0].tolist()]
-                        })
+                    if top_class == "nala" and top_conf >= CONFIDENCE_THRESHOLD:
+                        return True, top_conf, [{"class": "nala", "confidence": round(top_conf, 3)}]
+                    else:
+                        return False, 0.0, [{"class": top_class, "confidence": round(top_conf, 3)}]
+            else:
+                # Detection model (COCO): look for cat class
+                cat_detections = []
+                for result in results:
+                    for box in result.boxes:
+                        cls_id = int(box.cls[0])
+                        conf = float(box.conf[0])
 
-            is_cat = len(cat_detections) > 0
-            max_conf = max(d["confidence"] for d in cat_detections) if is_cat else 0.0
+                        if cls_id == CAT_CLASS_ID and conf >= CONFIDENCE_THRESHOLD:
+                            cat_detections.append({
+                                "confidence": round(conf, 3),
+                                "bbox": [round(x, 1) for x in box.xyxy[0].tolist()]
+                            })
 
-            return is_cat, max_conf, cat_detections
+                is_cat = len(cat_detections) > 0
+                max_conf = max(d["confidence"] for d in cat_detections) if is_cat else 0.0
+                return is_cat, max_conf, cat_detections
 
         except Exception as e:
             logger.error(f"Detection error: {e}")
