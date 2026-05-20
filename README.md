@@ -24,20 +24,68 @@ docker compose up -d
 # View logs
 docker compose logs -f nala-detector
 
-# Fine-tune (after collecting enough images)
+# Fine-tune via CLI (alternative to web UI)
 docker compose run --rm --profile training training
 
-# Restart to load new model after training
+# Restart detector (not needed if hot-reload is working)
 docker compose restart nala-detector
 ```
 
+## Web UI
+
+Access at **http://\<host\>:5151**
+
+The web UI provides a complete interface for managing training data and models.
+
+### Training Data Management
+
+- **Tabs:** Browse images sorted into Nala / Other Cat / No Cat categories
+- **Move:** Select images and move them between categories (e.g. re-classify a mislabelled image)
+- **Delete:** Remove bad/blurry images that would hurt training
+- **Select All / Deselect All:** Bulk operations for large batches
+
+### Training
+
+- Click **Start Training** to begin fine-tuning
+- Training runs YOLOv8n classification with the current dataset
+- Status shown in real-time (in progress / completed / failed)
+- Minimum 5 Nala images required to train
+- Parameters: 50 epochs, 640px image size, batch size 4
+
+### Model Management (Models tab)
+
+- **Version history:** Every training run saves a versioned model (`nala_v1_YYYYMMDD_HHMMSS.pt`, etc.)
+- **Active indicator:** Green badge shows which model is currently deployed
+- **Metadata:** Each version shows training date, dataset composition (Nala/other/no_cat counts), and training parameters
+- **Deploy:** Click to activate any historical model version — the detector hot-reloads within ~30 seconds
+- **Rollback to Generic YOLO:** Revert to the base pre-trained model if a custom model performs poorly
+- **Auto-deploy:** After successful training, the new model is automatically deployed and the detector reloads it
+
+### Hot-Reload
+
+The detector checks for model updates every 30 seconds. When a new model is deployed via the web UI (or after training completes), the detector picks it up automatically — no container restart required.
+
 ## Data directories
 
-- `data/training/cat/` — auto-collected cat frames
-- `data/training/no_cat/` — auto-collected non-cat frames
+- `data/training/cat/` — confirmed Nala frames (auto-collected + manually sorted)
+- `data/training/other_cat/` — other neighbourhood cats (for multi-class training)
+- `data/training/no_cat/` — non-cat frames (empty terrace, people, foxes, etc.)
 - `data/detections/` — confirmed cat detections with metadata
-- `models/yolov8n.pt` — base pre-trained model (downloaded at build)
-- `models/nala_custom.pt` — fine-tuned model (created after training)
+- `models/yolov8n.pt` — base pre-trained detection model
+- `models/yolov8n-cls.pt` — base classification model (downloaded on first training)
+- `models/nala_custom.pt` — currently active fine-tuned model
+- `models/history/` — versioned model archive with manifest
+
+## Fine-tuning workflow
+
+1. Let the detector run collecting frames (auto-sorted into `no_cat/`)
+2. Open the web UI and review images — move Nala frames from `no_cat` → `Nala` tab
+3. Delete blurry/useless frames
+4. Click **Start Training** in the web UI
+5. New model auto-deploys on success; detector hot-reloads
+6. Monitor detection accuracy, retrain with more data as needed
+
+Keep all training images between runs — more data improves each successive model.
 
 ## Environment variables
 
@@ -52,6 +100,9 @@ See `.env.example` for all available options.
 | CONFIDENCE_THRESHOLD | Min confidence to flag detection | 0.4 |
 | NOTIFY_COOLDOWN | Seconds between notifications | 300 |
 | COLLECT_DATA | Save frames for training | true |
+| TRAIN_EPOCHS | Training epochs | 50 |
+| TRAIN_IMGSZ | Training image size | 640 |
+| TRAIN_BATCH | Training batch size | 4 |
 
 ## MQTT topics
 
@@ -67,22 +118,29 @@ See `.env.example` for all available options.
 {
   "detected": true,
   "confidence": 0.87,
-  "detections": [{"confidence": 0.87, "bbox": [100, 200, 300, 400]}],
+  "detections": [{"class": "nala", "confidence": 0.87}],
   "timestamp": "20260519_134500",
   "notify": true
 }
 ```
 
-## Fine-tuning workflow
+## Architecture
 
-1. Let the detector run for 1-2 weeks collecting frames
-2. Review `data/training/cat/` — delete anything that is not your cat
-3. `data/training/no_cat/` should contain only non-cat images (usually fine as-is)
-4. Run: `docker compose run --rm --profile training training`
-5. Restart: `docker compose restart nala-detector`
-6. Repeat as needed for better accuracy
-
-Minimum 20 cat images required. 50-100 gives solid results.
+```
+┌──────────────┐     MQTT      ┌────────────────┐     MQTT     ┌─────────────────┐
+│ Ring Camera  │───────────────▶│ Nala Detector  │─────────────▶│ Home Assistant  │
+│ (via ring-   │  snapshot/     │ (YOLOv8 + hot  │  result/     │ (notifications) │
+│  mqtt)       │  motion        │  reload)       │  payload     │                 │
+└──────────────┘               └────────────────┘              └─────────────────┘
+                                       │
+                                       ▼
+                               ┌────────────────┐
+                               │   Web UI :5151 │
+                               │ • Image review │
+                               │ • Training     │
+                               │ • Model deploy │
+                               └────────────────┘
+```
 
 ## License
 
