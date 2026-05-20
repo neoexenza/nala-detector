@@ -8,6 +8,7 @@ services:
     volumes:
       - ./data:/data
       - ./models:/models
+      - ./cat_detector.py:/app/cat_detector.py:ro
     logging:
       options:
         max-size: 10m
@@ -25,6 +26,8 @@ services:
     volumes:
       - ./data:/data
       - ./models:/models
+      - ./web_ui.py:/app/web_ui.py:ro
+      - ./train.py:/app/train.py:ro
     entrypoint: ["python3", "/app/web_ui.py"]
 
   training:
@@ -40,4 +43,5 @@ services:
     volumes:
       - ./data:/data
       - ./models:/models
+      - ./train.py:/app/train.py:ro
     entrypoint: ["python3", "/app/train.py"]

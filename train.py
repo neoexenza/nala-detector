@@ -58,8 +58,8 @@ def prepare_dataset():
     logger.info(f"Dataset: {class_counts}")
 
     # Check minimum images for nala class
-    if class_counts.get("nala", 0) < 10:
-        logger.error(f"Not enough Nala images ({class_counts.get('nala', 0)}). Need at least 10.")
+    if class_counts.get("nala", 0) < 5:
+        logger.error(f"Not enough Nala images ({class_counts.get('nala', 0)}). Need at least 5.")
         sys.exit(1)
 
     # Split 80/20 train/val for each class
