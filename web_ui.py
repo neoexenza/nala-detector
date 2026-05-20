@@ -1,18 +1,27 @@
 """
 Nala Detector - Training Data Web UI
-Simple web interface to review/delete training images and kick off fine-tuning.
+Simple web interface to review/delete training images, kick off fine-tuning,
+and manage model versions.
 """
 
 import os
 import json
+import shutil
 import subprocess
 import threading
 from pathlib import Path
+from datetime import datetime
 from flask import Flask, render_template_string, jsonify, request, send_file
 
 app = Flask(__name__)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
+MODEL_DIR = "/models"
+HISTORY_DIR = os.path.join(MODEL_DIR, "history")
+MANIFEST_PATH = os.path.join(HISTORY_DIR, "manifest.json")
+CUSTOM_MODEL_PATH = os.path.join(MODEL_DIR, "nala_custom.pt")
+RELOAD_SIGNAL = os.path.join(MODEL_DIR, ".reload")
+
 FOLDERS = {
     "cat": os.path.join(DATA_DIR, "training", "cat"),
     "other_cat": os.path.join(DATA_DIR, "training", "other_cat"),
@@ -32,7 +41,7 @@ HTML_TEMPLATE = """
 body { font-family: -apple-system, system-ui, sans-serif; background: #1a1a2e; color: #eee; padding: 1rem; }
 h1 { margin-bottom: 0.5rem; }
 .stats { color: #888; margin-bottom: 1rem; }
-.tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
 .tab { padding: 0.5rem 1rem; background: #16213e; border: 1px solid #0f3460; border-radius: 4px; cursor: pointer; color: #eee; }
 .tab.active { background: #0f3460; border-color: #e94560; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 0.5rem; }
@@ -45,9 +54,29 @@ h1 { margin-bottom: 0.5rem; }
 .btn-danger { background: #e94560; color: #fff; }
 .btn-primary { background: #0f3460; color: #fff; border: 1px solid #e94560; }
 .btn-move { background: #533483; color: #fff; }
+.btn-success { background: #2d6a4f; color: #fff; }
+.btn-warning { background: #b8860b; color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .status { padding: 0.5rem; background: #16213e; border-radius: 4px; margin-bottom: 1rem; }
 .count { background: #0f3460; padding: 2px 6px; border-radius: 10px; font-size: 0.8rem; }
+
+/* Models tab styles */
+.models-container { display: none; }
+.models-container.visible { display: block; }
+.images-container { display: block; }
+.images-container.hidden { display: none; }
+.model-list { display: flex; flex-direction: column; gap: 0.75rem; }
+.model-card { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 1rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+.model-card.active { border-color: #2d6a4f; background: #1a2e3e; }
+.model-info { flex: 1; min-width: 200px; }
+.model-info h3 { font-size: 1rem; margin-bottom: 0.25rem; color: #eee; }
+.model-info .meta { font-size: 0.8rem; color: #888; }
+.model-info .meta span { margin-right: 1rem; }
+.model-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: bold; }
+.badge-active { background: #2d6a4f; color: #fff; }
+.badge-inactive { background: #333; color: #888; }
+.model-actions { display: flex; gap: 0.5rem; }
+.no-models { color: #888; text-align: center; padding: 2rem; }
 </style>
 </head>
 <body>
@@ -56,19 +85,28 @@ h1 { margin-bottom: 0.5rem; }
 <div class="status" id="training-status" style="display:none"></div>
 
 <div class="tabs">
-  <div class="tab active" onclick="switchTab('cat')">Nala <span class="count" id="cat-count">0</span></div>
-  <div class="tab" onclick="switchTab('other_cat')">Other Cat <span class="count" id="other-cat-count">0</span></div>
-  <div class="tab" onclick="switchTab('no_cat')">No Cat <span class="count" id="no-cat-count">0</span></div>
+  <div class="tab active" data-tab="cat" onclick="switchTab('cat')">Nala <span class="count" id="cat-count">0</span></div>
+  <div class="tab" data-tab="other_cat" onclick="switchTab('other_cat')">Other Cat <span class="count" id="other-cat-count">0</span></div>
+  <div class="tab" data-tab="no_cat" onclick="switchTab('no_cat')">No Cat <span class="count" id="no-cat-count">0</span></div>
+  <div class="tab" data-tab="models" onclick="switchTab('models')">Models <span class="count" id="models-count">0</span></div>
 </div>
 
-<div class="grid" id="grid"></div>
+<div class="images-container" id="images-container">
+  <div class="grid" id="grid"></div>
+  <div class="actions">
+    <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
+    <span id="move-buttons"></span>
+    <button class="btn btn-primary" onclick="selectAll()">Select All</button>
+    <button class="btn btn-primary" onclick="deselectAll()">Deselect All</button>
+    <button class="btn btn-primary" onclick="startTraining()" id="train-btn">Start Training</button>
+  </div>
+</div>
 
-<div class="actions">
-  <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
-  <span id="move-buttons"></span>
-  <button class="btn btn-primary" onclick="selectAll()">Select All</button>
-  <button class="btn btn-primary" onclick="deselectAll()">Deselect All</button>
-  <button class="btn btn-primary" onclick="startTraining()" id="train-btn">Start Training</button>
+<div class="models-container" id="models-container">
+  <div class="model-list" id="model-list"></div>
+  <div class="actions" style="margin-top: 1rem;">
+    <button class="btn btn-warning" onclick="rollbackGeneric()">Rollback to Generic YOLO</button>
+  </div>
 </div>
 
 <script>
@@ -77,6 +115,10 @@ let selected = new Set();
 let images = [];
 
 async function load() {
+  if (currentTab === 'models') {
+    loadModels();
+    return;
+  }
   const r = await fetch(`/api/images/${currentTab}`);
   images = await r.json();
   const rc = await fetch('/api/stats');
@@ -87,6 +129,57 @@ async function load() {
   document.getElementById('stats').textContent = `${stats.cat} Nala, ${stats.other_cat} other cats, ${stats.no_cat} no-cat, ${stats.detections} detections`;
   render();
   checkTraining();
+  // Also update models count
+  loadModelsCount();
+}
+
+async function loadModelsCount() {
+  try {
+    const r = await fetch('/api/models');
+    const data = await r.json();
+    document.getElementById('models-count').textContent = data.versions ? data.versions.length : 0;
+  } catch(e) {}
+}
+
+async function loadModels() {
+  const r = await fetch('/api/models');
+  const data = await r.json();
+  const list = document.getElementById('model-list');
+  document.getElementById('models-count').textContent = data.versions ? data.versions.length : 0;
+
+  if (!data.versions || data.versions.length === 0) {
+    list.innerHTML = '<div class="no-models">No trained models yet. Train your first model from the training data tabs.</div>';
+    return;
+  }
+
+  // Sort by version descending (newest first)
+  const versions = [...data.versions].sort((a, b) => b.version - a.version);
+
+  list.innerHTML = versions.map(v => {
+    const date = new Date(v.timestamp).toLocaleString();
+    const dataset = v.dataset || {};
+    const datasetStr = Object.entries(dataset).map(([k, c]) => `${k}: ${c}`).join(', ');
+    const params = v.training_params || {};
+    const paramsStr = `${params.epochs || '?'}ep, ${params.imgsz || '?'}px, batch ${params.batch || '?'}`;
+    const isActive = v.active;
+
+    return `
+      <div class="model-card ${isActive ? 'active' : ''}">
+        <div class="model-info">
+          <h3>v${v.version} <span class="model-badge ${isActive ? 'badge-active' : 'badge-inactive'}">${isActive ? 'ACTIVE' : 'inactive'}</span></h3>
+          <div class="meta">
+            <span>📅 ${date}</span>
+            <span>📊 ${datasetStr || 'N/A'}</span><br>
+            <span>⚙️ ${paramsStr}</span>
+            <span>📁 ${v.filename}</span>
+          </div>
+        </div>
+        <div class="model-actions">
+          ${isActive ? '' : `<button class="btn btn-success" onclick="deployModel('${v.filename}')">Deploy</button>`}
+        </div>
+      </div>
+    `;
+  }).join('');
 }
 
 function render() {
@@ -111,10 +204,18 @@ function deselectAll() { selected.clear(); render(); }
 function switchTab(tab) {
   currentTab = tab;
   selected.clear();
-  document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', ['cat','other_cat','no_cat'][i] === tab);
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tab);
   });
-  load();
+  if (tab === 'models') {
+    document.getElementById('images-container').classList.add('hidden');
+    document.getElementById('models-container').classList.add('visible');
+    loadModels();
+  } else {
+    document.getElementById('images-container').classList.remove('hidden');
+    document.getElementById('models-container').classList.remove('visible');
+    load();
+  }
 }
 
 async function deleteSelected() {
@@ -145,6 +246,30 @@ async function checkTraining() {
   if (s.running) { el.style.display = 'block'; el.textContent = '⏳ Training in progress...'; document.getElementById('train-btn').disabled = true; }
   else if (s.last_result) { el.style.display = 'block'; el.textContent = '✅ ' + s.last_result; document.getElementById('train-btn').disabled = false; }
   else { el.style.display = 'none'; document.getElementById('train-btn').disabled = false; }
+}
+
+async function deployModel(filename) {
+  if (!confirm(`Deploy model ${filename}? This will replace the current active model and reload the detector.`)) return;
+  const r = await fetch('/api/deploy', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: filename}) });
+  const result = await r.json();
+  if (result.success) {
+    alert('Model deployed successfully! Detector will reload within 30s.');
+    loadModels();
+  } else {
+    alert('Deploy failed: ' + (result.error || 'unknown error'));
+  }
+}
+
+async function rollbackGeneric() {
+  if (!confirm('Rollback to generic YOLOv8n? This will remove the custom model and the detector will fall back to COCO-based detection.')) return;
+  const r = await fetch('/api/rollback-generic', { method: 'POST' });
+  const result = await r.json();
+  if (result.success) {
+    alert('Rolled back to generic YOLO. Detector will reload within 30s.');
+    loadModels();
+  } else {
+    alert('Rollback failed: ' + (result.error || 'unknown error'));
+  }
 }
 
 load();
@@ -241,6 +366,75 @@ def start_training():
 def get_training_status():
     return jsonify(training_status)
 
+@app.route("/api/models")
+def get_models():
+    """Return model version manifest."""
+    if not os.path.exists(MANIFEST_PATH):
+        return jsonify({"versions": [], "next_version": 1})
+    try:
+        with open(MANIFEST_PATH, "r") as f:
+            manifest = json.load(f)
+        return jsonify(manifest)
+    except Exception as e:
+        return jsonify({"versions": [], "error": str(e)})
+
+@app.route("/api/deploy", methods=["POST"])
+def deploy_model():
+    """Deploy a specific model version."""
+    data = request.json
+    filename = data.get("filename")
+    if not filename or ".." in filename:
+        return jsonify({"success": False, "error": "invalid filename"}), 400
+
+    source = os.path.join(HISTORY_DIR, filename)
+    if not os.path.exists(source):
+        return jsonify({"success": False, "error": "model file not found"}), 404
+
+    try:
+        # Copy model to active path
+        shutil.copy2(source, CUSTOM_MODEL_PATH)
+
+        # Update manifest to mark this version as active
+        if os.path.exists(MANIFEST_PATH):
+            with open(MANIFEST_PATH, "r") as f:
+                manifest = json.load(f)
+            for v in manifest["versions"]:
+                v["active"] = (v["filename"] == filename)
+            with open(MANIFEST_PATH, "w") as f:
+                json.dump(manifest, f, indent=2)
+
+        # Signal detector to reload
+        with open(RELOAD_SIGNAL, "w") as f:
+            f.write(datetime.now().isoformat())
+
+        return jsonify({"success": True, "deployed": filename})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/rollback-generic", methods=["POST"])
+def rollback_generic():
+    """Remove custom model so detector falls back to generic YOLO."""
+    try:
+        if os.path.exists(CUSTOM_MODEL_PATH):
+            os.remove(CUSTOM_MODEL_PATH)
+
+        # Update manifest to mark none as active
+        if os.path.exists(MANIFEST_PATH):
+            with open(MANIFEST_PATH, "r") as f:
+                manifest = json.load(f)
+            for v in manifest["versions"]:
+                v["active"] = False
+            with open(MANIFEST_PATH, "w") as f:
+                json.dump(manifest, f, indent=2)
+
+        # Signal detector to reload
+        with open(RELOAD_SIGNAL, "w") as f:
+            f.write(datetime.now().isoformat())
+
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 def run_training():
     try:
         result = subprocess.run(
@@ -248,7 +442,7 @@ def run_training():
             capture_output=True, text=True, timeout=3600
         )
         if result.returncode == 0:
-            training_status["last_result"] = "Training completed successfully"
+            training_status["last_result"] = "Training completed successfully — model auto-deployed"
         else:
             training_status["last_result"] = f"Training failed: {result.stderr[-200:]}"
     except Exception as e:

@@ -9,9 +9,11 @@ Trains a YOLOv8n classification model to distinguish:
 
 import os
 import sys
+import json
 import shutil
 import logging
 from pathlib import Path
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("nala-train")
@@ -19,8 +21,11 @@ logger = logging.getLogger("nala-train")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 TRAINING_DIR = DATA_DIR / "training"
 MODEL_DIR = Path("/models")
+HISTORY_DIR = MODEL_DIR / "history"
 BASE_MODEL = MODEL_DIR / "yolov8n-cls.pt"
 CUSTOM_MODEL = MODEL_DIR / "nala_custom.pt"
+MANIFEST_PATH = HISTORY_DIR / "manifest.json"
+RELOAD_SIGNAL = MODEL_DIR / ".reload"
 
 EPOCHS = int(os.environ.get("TRAIN_EPOCHS", "50"))
 IMGSZ = int(os.environ.get("TRAIN_IMGSZ", "224"))
@@ -32,6 +37,68 @@ CLASSES = {
     "other_cat": "other_cat",  # Other neighbourhood cats
     "no_cat": "no_cat"    # No cat present
 }
+
+
+def load_manifest():
+    """Load the model version manifest."""
+    if MANIFEST_PATH.exists():
+        with open(MANIFEST_PATH, "r") as f:
+            return json.load(f)
+    return {"versions": [], "next_version": 1}
+
+
+def save_manifest(manifest):
+    """Save manifest to disk."""
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    with open(MANIFEST_PATH, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
+def get_next_version(manifest):
+    """Get the next version number."""
+    return manifest.get("next_version", 1)
+
+
+def save_versioned_model(model_path, dataset_stats):
+    """Save model to history with version number and metadata."""
+    manifest = load_manifest()
+    version = get_next_version(manifest)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"nala_v{version}_{timestamp}.pt"
+    dest = HISTORY_DIR / filename
+
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(model_path, dest)
+
+    entry = {
+        "version": version,
+        "filename": filename,
+        "timestamp": datetime.now().isoformat(),
+        "dataset": dataset_stats,
+        "training_params": {
+            "epochs": EPOCHS,
+            "imgsz": IMGSZ,
+            "batch": BATCH
+        },
+        "active": True
+    }
+
+    # Mark all previous as not active
+    for v in manifest["versions"]:
+        v["active"] = False
+
+    manifest["versions"].append(entry)
+    manifest["next_version"] = version + 1
+    save_manifest(manifest)
+
+    logger.info(f"Saved versioned model: {filename} (v{version})")
+    return filename
+
+
+def signal_reload():
+    """Write reload signal file for the detector to pick up."""
+    RELOAD_SIGNAL.write_text(datetime.now().isoformat())
+    logger.info("Wrote reload signal for detector")
 
 
 def prepare_dataset():
@@ -87,14 +154,14 @@ def prepare_dataset():
 
         logger.info(f"  {label}: {len(train_images)} train, {len(val_images)} val")
 
-    return dataset_dir
+    return dataset_dir, class_counts
 
 
 def train():
     """Run fine-tuning."""
     from ultralytics import YOLO
 
-    dataset_dir = prepare_dataset()
+    dataset_dir, dataset_stats = prepare_dataset()
 
     # Use YOLOv8n-cls (classification variant)
     if not BASE_MODEL.exists():
@@ -122,7 +189,14 @@ def train():
     if best_model.exists():
         shutil.copy2(best_model, CUSTOM_MODEL)
         logger.info(f"Custom model saved to {CUSTOM_MODEL}")
-        logger.info("Restart nala-detector to load the new model.")
+
+        # Save versioned copy to history
+        save_versioned_model(CUSTOM_MODEL, dataset_stats)
+
+        # Signal detector to hot-reload
+        signal_reload()
+
+        logger.info("Model deployed and reload signalled.")
     else:
         logger.error("Training completed but no best.pt found!")
         sys.exit(1)

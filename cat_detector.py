@@ -53,6 +53,11 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/models/yolov8n.pt")
 CUSTOM_MODEL_PATH = os.environ.get("CUSTOM_MODEL_PATH", "/models/nala_custom.pt")
 USE_CLASSIFICATION = False  # Set True when custom model is a classifier
 
+# Model hot-reload
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/models"))
+RELOAD_SIGNAL = MODEL_DIR / ".reload"
+RELOAD_CHECK_INTERVAL = int(os.environ.get("RELOAD_CHECK_INTERVAL", "30"))
+
 # Data collection for fine-tuning
 COLLECT_DATA = os.environ.get("COLLECT_DATA", "true").lower() == "true"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
@@ -74,6 +79,7 @@ class NalaDetector:
         self.last_notify_time = 0
         self.model = self._load_model()
         self.mqtt_client = None
+        self._reload_thread = None
 
         # Ensure data directories exist
         if COLLECT_DATA:
@@ -96,7 +102,30 @@ class NalaDetector:
     def reload_model(self):
         """Hot-reload model (call after fine-tuning)."""
         self.model = self._load_model()
-        logger.info("Model reloaded")
+        logger.info("Model reloaded successfully")
+
+    def _start_reload_watcher(self):
+        """Start background thread to watch for reload signal."""
+        def watcher():
+            logger.info(f"Model reload watcher started (checking every {RELOAD_CHECK_INTERVAL}s)")
+            while True:
+                try:
+                    time.sleep(RELOAD_CHECK_INTERVAL)
+                    if RELOAD_SIGNAL.exists():
+                        logger.info("Reload signal detected! Reloading model...")
+                        try:
+                            self.reload_model()
+                            # Remove the signal file after successful reload
+                            RELOAD_SIGNAL.unlink()
+                            logger.info("Reload signal consumed")
+                        except Exception as e:
+                            logger.error(f"Model reload failed: {e}")
+                except Exception as e:
+                    logger.error(f"Reload watcher error: {e}")
+                    time.sleep(10)
+
+        self._reload_thread = threading.Thread(target=watcher, daemon=True)
+        self._reload_thread.start()
 
     def detect_cat(self, image_bytes):
         """Run inference on image bytes. Returns (is_nala, confidence, details)."""
@@ -280,6 +309,9 @@ class NalaDetector:
         logger.info(f"Confidence threshold: {CONFIDENCE_THRESHOLD}")
         logger.info(f"Notify cooldown: {NOTIFY_COOLDOWN}s")
         logger.info(f"Collecting training data: {COLLECT_DATA}")
+
+        # Start the model reload watcher
+        self._start_reload_watcher()
 
         self.mqtt_client = mqtt.Client(
             client_id="nala-detector",
