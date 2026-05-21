@@ -57,6 +57,9 @@ h1 { margin-bottom: 0.5rem; }
 .btn-success { background: #2d6a4f; color: #fff; }
 .btn-warning { background: #b8860b; color: #fff; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-small { padding: 0.3rem 0.6rem; font-size: 0.8rem; background: #16213e; border: 1px solid #0f3460; color: #eee; }
+.sort-bar { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+.sort-bar label { color: #888; font-size: 0.85rem; }
 .status { padding: 0.5rem; background: #16213e; border-radius: 4px; margin-bottom: 1rem; }
 .count { background: #0f3460; padding: 2px 6px; border-radius: 10px; font-size: 0.8rem; }
 
@@ -77,6 +80,22 @@ h1 { margin-bottom: 0.5rem; }
 .badge-inactive { background: #333; color: #888; }
 .model-actions { display: flex; gap: 0.5rem; }
 .no-models { color: #888; text-align: center; padding: 2rem; }
+
+/* Detections tab styles */
+.detections-container { display: none; }
+.detections-container.visible { display: block; }
+.det-list { display: flex; flex-direction: column; gap: 0.25rem; }
+.det-row { display: flex; align-items: center; gap: 1rem; padding: 0.6rem 0.8rem; background: #16213e; border: 1px solid #0f3460; border-radius: 4px; cursor: pointer; transition: background 0.15s; }
+.det-row:hover { background: #1a2e3e; border-color: #e94560; }
+.det-date { font-size: 0.85rem; color: #ccc; min-width: 140px; }
+.det-label { font-size: 0.85rem; font-weight: bold; min-width: 80px; }
+.det-label.nala { color: #e94560; }
+.det-label.other_cat { color: #533483; }
+.det-label.no_cat { color: #888; }
+.det-confidence { font-size: 0.85rem; color: #2d6a4f; min-width: 50px; }
+.det-pagination { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; justify-content: center; }
+.det-pagination .btn { min-width: 80px; }
+.det-page-info { color: #888; font-size: 0.85rem; }
 </style>
 </head>
 <body>
@@ -88,10 +107,15 @@ h1 { margin-bottom: 0.5rem; }
   <div class="tab active" data-tab="cat" onclick="switchTab('cat')">Nala <span class="count" id="cat-count">0</span></div>
   <div class="tab" data-tab="other_cat" onclick="switchTab('other_cat')">Other Cat <span class="count" id="other-cat-count">0</span></div>
   <div class="tab" data-tab="no_cat" onclick="switchTab('no_cat')">No Cat <span class="count" id="no-cat-count">0</span></div>
+  <div class="tab" data-tab="detections" onclick="switchTab('detections')">Detections <span class="count" id="detections-count">0</span></div>
   <div class="tab" data-tab="models" onclick="switchTab('models')">Models <span class="count" id="models-count">0</span></div>
 </div>
 
 <div class="images-container" id="images-container">
+  <div class="sort-bar">
+    <label>Sort: </label>
+    <button class="btn btn-small" id="sort-btn" onclick="toggleSort()">Newest first</button>
+  </div>
   <div class="grid" id="grid"></div>
   <div class="actions">
     <button class="btn btn-danger" onclick="deleteSelected()">Delete Selected</button>
@@ -99,6 +123,15 @@ h1 { margin-bottom: 0.5rem; }
     <button class="btn btn-primary" onclick="selectAll()">Select All</button>
     <button class="btn btn-primary" onclick="deselectAll()">Deselect All</button>
     <button class="btn btn-primary" onclick="startTraining()" id="train-btn">Start Training</button>
+  </div>
+</div>
+
+<div class="detections-container" id="detections-container">
+  <div class="det-list" id="det-list"></div>
+  <div class="det-pagination">
+    <button class="btn btn-primary" id="det-prev" onclick="detPrev()">← Prev</button>
+    <span class="det-page-info" id="det-page-info">Page 1</span>
+    <button class="btn btn-primary" id="det-next" onclick="detNext()">Next →</button>
   </div>
 </div>
 
@@ -113,24 +146,87 @@ h1 { margin-bottom: 0.5rem; }
 let currentTab = 'cat';
 let selected = new Set();
 let images = [];
+let sortOrder = localStorage.getItem('nala-sort') || 'newest';
+let detPage = 1;
+const DET_PAGE_SIZE = 30;
+let detections = [];
 
 async function load() {
-  if (currentTab === 'models') {
-    loadModels();
-    return;
-  }
-  const r = await fetch(`/api/images/${currentTab}`);
+  if (currentTab === 'models') { loadModels(); return; }
+  if (currentTab === 'detections') { loadDetections(); return; }
+  const r = await fetch(`/api/images/${currentTab}?sort=${sortOrder}`);
   images = await r.json();
   const rc = await fetch('/api/stats');
   const stats = await rc.json();
   document.getElementById('cat-count').textContent = stats.cat;
   document.getElementById('other-cat-count').textContent = stats.other_cat;
   document.getElementById('no-cat-count').textContent = stats.no_cat;
+  document.getElementById('detections-count').textContent = stats.detections;
   document.getElementById('stats').textContent = `${stats.cat} Nala, ${stats.other_cat} other cats, ${stats.no_cat} no-cat, ${stats.detections} detections`;
   render();
   checkTraining();
-  // Also update models count
   loadModelsCount();
+}
+
+async function loadDetections() {
+  const r = await fetch('/api/detections?sort=' + sortOrder);
+  detections = await r.json();
+  const rc = await fetch('/api/stats');
+  const stats = await rc.json();
+  document.getElementById('detections-count').textContent = stats.detections;
+  document.getElementById('cat-count').textContent = stats.cat;
+  document.getElementById('other-cat-count').textContent = stats.other_cat;
+  document.getElementById('no-cat-count').textContent = stats.no_cat;
+  document.getElementById('stats').textContent = `${stats.cat} Nala, ${stats.other_cat} other cats, ${stats.no_cat} no-cat, ${stats.detections} detections`;
+  renderDetections();
+}
+
+function renderDetections() {
+  const total = detections.length;
+  const totalPages = Math.max(1, Math.ceil(total / DET_PAGE_SIZE));
+  if (detPage > totalPages) detPage = totalPages;
+  const start = (detPage - 1) * DET_PAGE_SIZE;
+  const page = detections.slice(start, start + DET_PAGE_SIZE);
+
+  const list = document.getElementById('det-list');
+  if (total === 0) {
+    list.innerHTML = '<div class="no-models">No detections recorded yet.</div>';
+  } else {
+    list.innerHTML = page.map(d => {
+      const labelClass = d.label === 'nala' ? 'nala' : d.label === 'other_cat' ? 'other_cat' : 'no_cat';
+      const labelText = d.label === 'nala' ? 'Nala' : d.label === 'other_cat' ? 'Other Cat' : d.label;
+      return `<div class="det-row" onclick="goToDetection('${d.file}', '${d.label}')">
+        <span class="det-date">${d.datetime}</span>
+        <span class="det-label ${labelClass}">${labelText}</span>
+        <span class="det-confidence">${d.confidence}%</span>
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('det-page-info').textContent = `Page ${detPage} / ${totalPages} (${total} total)`;
+  document.getElementById('det-prev').disabled = detPage <= 1;
+  document.getElementById('det-next').disabled = detPage >= totalPages;
+}
+
+function detPrev() { if (detPage > 1) { detPage--; renderDetections(); } }
+function detNext() { const totalPages = Math.ceil(detections.length / DET_PAGE_SIZE); if (detPage < totalPages) { detPage++; renderDetections(); } }
+
+function goToDetection(file, label) {
+  // Map label to tab
+  let tab = 'cat';
+  if (label === 'other_cat') tab = 'other_cat';
+  else if (label === 'no_cat') tab = 'no_cat';
+  else tab = 'cat';  // nala -> cat tab
+
+  // Switch to that tab and select the file
+  currentTab = tab;
+  selected.clear();
+  selected.add(file);
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.getElementById('images-container').classList.remove('hidden');
+  document.getElementById('detections-container').classList.remove('visible');
+  document.getElementById('models-container').classList.remove('visible');
+  load();
 }
 
 async function loadModelsCount() {
@@ -152,9 +248,7 @@ async function loadModels() {
     return;
   }
 
-  // Sort by version descending (newest first)
   const versions = [...data.versions].sort((a, b) => b.version - a.version);
-
   list.innerHTML = versions.map(v => {
     const date = new Date(v.timestamp).toLocaleString();
     const dataset = v.dataset || {};
@@ -162,7 +256,6 @@ async function loadModels() {
     const params = v.training_params || {};
     const paramsStr = `${params.epochs || '?'}ep, ${params.imgsz || '?'}px, batch ${params.batch || '?'}`;
     const isActive = v.active;
-
     return `
       <div class="model-card ${isActive ? 'active' : ''}">
         <div class="model-info">
@@ -177,8 +270,7 @@ async function loadModels() {
         <div class="model-actions">
           ${isActive ? '' : `<button class="btn btn-success" onclick="deployModel('${v.filename}')">Deploy</button>`}
         </div>
-      </div>
-    `;
+      </div>`;
   }).join('');
 }
 
@@ -190,11 +282,25 @@ function render() {
       <div class="name">${img}</div>
     </div>
   `).join('');
-  // Build move buttons
   const folders = ['cat', 'other_cat', 'no_cat'].filter(f => f !== currentTab);
-  document.getElementById('move-buttons').innerHTML = folders.map(f => 
+  document.getElementById('move-buttons').innerHTML = folders.map(f =>
     `<button class="btn btn-move" onclick="moveSelected('${f}')">${f === 'cat' ? 'Nala' : f === 'other_cat' ? 'Other Cat' : 'No Cat'}</button>`
   ).join('');
+  document.getElementById('sort-btn').textContent = sortOrder === 'newest' ? 'Newest first' : 'Oldest first';
+
+  // Scroll to selected item if any
+  if (selected.size === 1) {
+    setTimeout(() => {
+      const sel = document.querySelector('.card.selected');
+      if (sel) sel.scrollIntoView({behavior: 'smooth', block: 'center'});
+    }, 100);
+  }
+}
+
+function toggleSort() {
+  sortOrder = sortOrder === 'newest' ? 'oldest' : 'newest';
+  localStorage.setItem('nala-sort', sortOrder);
+  load();
 }
 
 function toggle(img) { selected.has(img) ? selected.delete(img) : selected.add(img); render(); }
@@ -204,15 +310,20 @@ function deselectAll() { selected.clear(); render(); }
 function switchTab(tab) {
   currentTab = tab;
   selected.clear();
-  document.querySelectorAll('.tab').forEach(t => {
-    t.classList.toggle('active', t.dataset.tab === tab);
-  });
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   if (tab === 'models') {
     document.getElementById('images-container').classList.add('hidden');
+    document.getElementById('detections-container').classList.remove('visible');
     document.getElementById('models-container').classList.add('visible');
     loadModels();
+  } else if (tab === 'detections') {
+    document.getElementById('images-container').classList.add('hidden');
+    document.getElementById('models-container').classList.remove('visible');
+    document.getElementById('detections-container').classList.add('visible');
+    loadDetections();
   } else {
     document.getElementById('images-container').classList.remove('hidden');
+    document.getElementById('detections-container').classList.remove('visible');
     document.getElementById('models-container').classList.remove('visible');
     load();
   }
@@ -249,27 +360,19 @@ async function checkTraining() {
 }
 
 async function deployModel(filename) {
-  if (!confirm(`Deploy model ${filename}? This will replace the current active model and reload the detector.`)) return;
+  if (!confirm(`Deploy model ${filename}?`)) return;
   const r = await fetch('/api/deploy', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({filename: filename}) });
   const result = await r.json();
-  if (result.success) {
-    alert('Model deployed successfully! Detector will reload within 30s.');
-    loadModels();
-  } else {
-    alert('Deploy failed: ' + (result.error || 'unknown error'));
-  }
+  if (result.success) { alert('Model deployed! Detector will reload within 30s.'); loadModels(); }
+  else { alert('Deploy failed: ' + (result.error || 'unknown error')); }
 }
 
 async function rollbackGeneric() {
-  if (!confirm('Rollback to generic YOLOv8n? This will remove the custom model and the detector will fall back to COCO-based detection.')) return;
+  if (!confirm('Rollback to generic YOLOv8n?')) return;
   const r = await fetch('/api/rollback-generic', { method: 'POST' });
   const result = await r.json();
-  if (result.success) {
-    alert('Rolled back to generic YOLO. Detector will reload within 30s.');
-    loadModels();
-  } else {
-    alert('Rollback failed: ' + (result.error || 'unknown error'));
-  }
+  if (result.success) { alert('Rolled back to generic YOLO. Detector will reload within 30s.'); loadModels(); }
+  else { alert('Rollback failed: ' + (result.error || 'unknown error')); }
 }
 
 load();
@@ -292,21 +395,73 @@ def stats():
     det_count = len(list(Path(det_dir).glob("*.json"))) if os.path.exists(det_dir) else 0
     return jsonify({"cat": cat_count, "other_cat": other_cat_count, "no_cat": no_cat_count, "detections": det_count})
 
+@app.route("/api/detections")
+def list_detections():
+    """Return paginated detection log with metadata from .json files."""
+    sort_order = request.args.get('sort', 'newest')
+    det_dir = os.path.join(DATA_DIR, "detections")
+    if not os.path.exists(det_dir):
+        return jsonify([])
+
+    json_files = sorted(
+        [f for f in os.listdir(det_dir) if f.endswith(".json")],
+        reverse=(sort_order == 'newest')
+    )
+
+    results = []
+    for jf in json_files:
+        json_path = os.path.join(det_dir, jf)
+        img_file = jf.replace('.json', '.jpg')
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+            # data is a list like [{"class": "nala", "confidence": 0.98}]
+            if isinstance(data, list) and len(data) > 0:
+                entry = data[0]
+            else:
+                entry = data
+            label = entry.get("class", "unknown")
+            confidence = round(entry.get("confidence", 0) * 100, 1)
+        except:
+            label = "unknown"
+            confidence = 0
+
+        # Parse datetime from filename: 20260521_035735.json
+        basename = jf.replace('.json', '')
+        try:
+            dt = datetime.strptime(basename, "%Y%m%d_%H%M%S")
+            dt_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            dt_str = basename
+
+        results.append({
+            "file": img_file,
+            "datetime": dt_str,
+            "label": label,
+            "confidence": confidence
+        })
+
+    return jsonify(results)
+
 @app.route("/api/images/<folder>")
 def list_images(folder):
+    sort_order = request.args.get('sort', 'newest')
     if folder not in FOLDERS:
         return jsonify([])
     dir_path = FOLDERS[folder]
     if not os.path.exists(dir_path):
         return jsonify([])
-    files = sorted([f for f in os.listdir(dir_path) if f.endswith(".jpg")], reverse=True)
+    files = sorted([f for f in os.listdir(dir_path) if f.endswith(".jpg")], reverse=(sort_order == 'newest'))
     return jsonify(files)
 
 @app.route("/api/image/<folder>/<filename>")
 def get_image(folder, filename):
-    if folder not in FOLDERS:
+    if folder == 'detections':
+        dir_path = os.path.join(DATA_DIR, "detections")
+    elif folder in FOLDERS:
+        dir_path = FOLDERS[folder]
+    else:
         return "not found", 404
-    dir_path = FOLDERS[folder]
     filepath = os.path.join(dir_path, filename)
     if not os.path.exists(filepath) or ".." in filename:
         return "not found", 404
@@ -317,9 +472,10 @@ def delete_images():
     data = request.json
     folder = data.get("folder")
     files = data.get("files", [])
-    if folder not in FOLDERS:
+    if folder in FOLDERS:
+        dir_path = FOLDERS[folder]
+    else:
         return jsonify({"error": "bad folder"}), 400
-    dir_path = FOLDERS[folder]
     deleted = 0
     for f in files:
         if ".." in f:
@@ -336,8 +492,10 @@ def move_images():
     src_folder = data.get("from")
     dst_folder = data.get("to")
     files = data.get("files", [])
-    if src_folder not in FOLDERS or dst_folder not in FOLDERS:
-        return jsonify({"error": "bad folder"}), 400
+    if src_folder not in FOLDERS:
+        return jsonify({"error": "bad source folder"}), 400
+    if dst_folder not in FOLDERS:
+        return jsonify({"error": "bad destination folder"}), 400
     src_dir = FOLDERS[src_folder]
     dst_dir = FOLDERS[dst_folder]
     os.makedirs(dst_dir, exist_ok=True)
@@ -391,10 +549,7 @@ def deploy_model():
         return jsonify({"success": False, "error": "model file not found"}), 404
 
     try:
-        # Copy model to active path
         shutil.copy2(source, CUSTOM_MODEL_PATH)
-
-        # Update manifest to mark this version as active
         if os.path.exists(MANIFEST_PATH):
             with open(MANIFEST_PATH, "r") as f:
                 manifest = json.load(f)
@@ -402,11 +557,8 @@ def deploy_model():
                 v["active"] = (v["filename"] == filename)
             with open(MANIFEST_PATH, "w") as f:
                 json.dump(manifest, f, indent=2)
-
-        # Signal detector to reload
         with open(RELOAD_SIGNAL, "w") as f:
             f.write(datetime.now().isoformat())
-
         return jsonify({"success": True, "deployed": filename})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -417,8 +569,6 @@ def rollback_generic():
     try:
         if os.path.exists(CUSTOM_MODEL_PATH):
             os.remove(CUSTOM_MODEL_PATH)
-
-        # Update manifest to mark none as active
         if os.path.exists(MANIFEST_PATH):
             with open(MANIFEST_PATH, "r") as f:
                 manifest = json.load(f)
@@ -426,11 +576,8 @@ def rollback_generic():
                 v["active"] = False
             with open(MANIFEST_PATH, "w") as f:
                 json.dump(manifest, f, indent=2)
-
-        # Signal detector to reload
         with open(RELOAD_SIGNAL, "w") as f:
             f.write(datetime.now().isoformat())
-
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
