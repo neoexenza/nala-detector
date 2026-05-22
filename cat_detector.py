@@ -3,6 +3,7 @@
 Nala Cat Detector
 Subscribes to Ring camera motion snapshots via MQTT,
 runs YOLO inference, and publishes cat detection results.
+Now with SQLite for persistent event tracking.
 """
 
 import os
@@ -10,10 +11,12 @@ import io
 import json
 import time
 import logging
+import sqlite3
 import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from collections import defaultdict
 
 import paho.mqtt.client as mqtt
 from PIL import Image
@@ -63,6 +66,7 @@ COLLECT_DATA = os.environ.get("COLLECT_DATA", "true").lower() == "true"
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 TRAINING_DIR = DATA_DIR / "training"
 DETECTIONS_DIR = DATA_DIR / "detections"
+DB_PATH = DATA_DIR / "nala.db"
 
 # Cooldown to avoid spam (seconds)
 NOTIFY_COOLDOWN = int(os.environ.get("NOTIFY_COOLDOWN", "300"))
@@ -74,18 +78,60 @@ logging.basicConfig(
 logger = logging.getLogger("nala")
 
 
+def init_db():
+    """Initialize SQLite database with WAL mode."""
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS detections (
+            id          TEXT PRIMARY KEY,
+            timestamp   TEXT NOT NULL,
+            label       TEXT NOT NULL,
+            confidence  REAL,
+            frame_path  TEXT,
+            in_dataset  INTEGER DEFAULT 0,
+            notified    INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_det_ts ON detections(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_det_label ON detections(label)")
+    conn.commit()
+    conn.close()
+
+
+def get_next_id(conn):
+    """Get the next incremental ID for today: YYYYMMDD_N."""
+    today = datetime.now().strftime("%Y%m%d")
+    row = conn.execute(
+        "SELECT id FROM detections WHERE id LIKE ? ORDER BY id DESC LIMIT 1",
+        (f"{today}_%",)
+    ).fetchone()
+    if row:
+        try:
+            seq = int(row[0].split("_", 1)[1]) + 1
+        except (ValueError, IndexError):
+            seq = 1
+    else:
+        seq = 1
+    return f"{today}_{seq}"
+
+
 class NalaDetector:
     def __init__(self):
         self.last_notify_time = 0
         self.model = self._load_model()
         self.mqtt_client = None
         self._reload_thread = None
+        self._db_lock = threading.Lock()
 
         # Ensure data directories exist
         if COLLECT_DATA:
             (TRAINING_DIR / "cat").mkdir(parents=True, exist_ok=True)
             (TRAINING_DIR / "no_cat").mkdir(parents=True, exist_ok=True)
             DETECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Initialize database
+        init_db()
 
     def _load_model(self):
         """Load custom model if available, otherwise fall back to pre-trained."""
@@ -115,7 +161,6 @@ class NalaDetector:
                         logger.info("Reload signal detected! Reloading model...")
                         try:
                             self.reload_model()
-                            # Remove the signal file after successful reload
                             RELOAD_SIGNAL.unlink()
                             logger.info("Reload signal consumed")
                         except Exception as e:
@@ -134,7 +179,6 @@ class NalaDetector:
             results = self.model(image, verbose=False)
 
             if USE_CLASSIFICATION:
-                # Classification model: returns class probabilities
                 for result in results:
                     probs = result.probs
                     top_class = result.names[probs.top1]
@@ -145,7 +189,6 @@ class NalaDetector:
                     else:
                         return False, 0.0, [{"class": top_class, "confidence": round(top_conf, 3)}]
             else:
-                # Detection model (COCO): look for cat class
                 cat_detections = []
                 for result in results:
                     for box in result.boxes:
@@ -166,13 +209,13 @@ class NalaDetector:
             logger.error(f"Detection error: {e}")
             return False, 0.0, []
 
-    def save_training_data(self, image_bytes, is_cat, timestamp):
+    def save_training_data(self, image_bytes, is_cat, det_id):
         """Save frame for future fine-tuning."""
         if not COLLECT_DATA:
             return
 
         subdir = "cat" if is_cat else "no_cat"
-        filename = f"{timestamp}.jpg"
+        filename = f"{det_id}.jpg"
         filepath = TRAINING_DIR / subdir / filename
 
         with open(filepath, "wb") as f:
@@ -180,15 +223,27 @@ class NalaDetector:
 
         logger.debug(f"Saved training frame: {filepath}")
 
-    def save_detection(self, image_bytes, details, timestamp):
-        """Save detected cat image for review."""
-        filepath = DETECTIONS_DIR / f"{timestamp}.jpg"
+    def save_detection_frame(self, image_bytes, det_id):
+        """Save frame to detections directory."""
+        filepath = DETECTIONS_DIR / f"{det_id}.jpg"
         with open(filepath, "wb") as f:
             f.write(image_bytes)
+        return str(filepath)
 
-        meta_path = DETECTIONS_DIR / f"{timestamp}.json"
-        with open(meta_path, "w") as f:
-            json.dump(details, f)
+    def save_to_db(self, det_id, timestamp_iso, label, confidence, frame_path, notified):
+        """Insert detection event into SQLite."""
+        with self._db_lock:
+            conn = sqlite3.connect(str(DB_PATH), timeout=10)
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO detections
+                       (id, timestamp, label, confidence, frame_path, in_dataset, notified)
+                       VALUES (?, ?, ?, ?, ?, 0, ?)""",
+                    (det_id, timestamp_iso, label, confidence, frame_path, 1 if notified else 0)
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
     def should_notify(self):
         """Check cooldown to avoid spamming."""
@@ -211,7 +266,6 @@ class NalaDetector:
 
     def _grab_rtsp_frame(self, client):
         """Grab a frame from the RTSP live stream using ffmpeg."""
-        # Small delay to let the stream stabilise after motion triggers
         time.sleep(3)
         logger.info(f"Grabbing frame from RTSP stream...")
         try:
@@ -247,35 +301,69 @@ class NalaDetector:
 
     def _process_frame(self, client, image_bytes):
         """Run detection on a frame and publish results."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        is_cat, confidence, details = self.detect_cat(image_bytes)
-        self.save_training_data(image_bytes, is_cat, timestamp)
+        # Generate incremental ID
+        with self._db_lock:
+            conn = sqlite3.connect(str(DB_PATH), timeout=10)
+            det_id = get_next_id(conn)
+            conn.close()
 
+        now = datetime.now()
+        timestamp_iso = now.isoformat()
+
+        is_cat, confidence, details = self.detect_cat(image_bytes)
+
+        # Determine label
         if is_cat:
-            logger.info(f"CAT DETECTED! Confidence: {confidence:.1%}")
-            self.save_detection(image_bytes, details, timestamp)
+            label = "nala"
+            if details and isinstance(details[0], dict) and "class" in details[0]:
+                label = details[0]["class"]
+        else:
+            label = "no_cat"
+            if details and isinstance(details[0], dict) and "class" in details[0]:
+                label = details[0]["class"]
+
+        # Save frame (ALL events, not just positives)
+        frame_path = self.save_detection_frame(image_bytes, det_id)
+
+        # Save training data
+        self.save_training_data(image_bytes, is_cat, det_id)
+
+        # Determine notification
+        notified = False
+        if is_cat:
+            logger.info(f"CAT DETECTED! Confidence: {confidence:.1%} [ID: {det_id}]")
+            notified = self.should_notify()
             result_payload = json.dumps({
                 "detected": True,
                 "confidence": confidence,
                 "detections": details,
-                "timestamp": timestamp,
-                "notify": self.should_notify()
+                "id": det_id,
+                "timestamp": timestamp_iso,
+                "notify": notified
             })
             client.publish(RESULT_TOPIC, result_payload, retain=True)
         else:
-            logger.info("No cat detected")
+            logger.info(f"No cat detected [ID: {det_id}]")
             result_payload = json.dumps({
                 "detected": False,
-                "timestamp": timestamp
+                "id": det_id,
+                "timestamp": timestamp_iso
             })
             client.publish(RESULT_TOPIC, result_payload, retain=True)
+
+        # Save to SQLite
+        self.save_to_db(det_id, timestamp_iso, label, confidence if is_cat else None, frame_path, notified)
+
+        # Also save legacy JSON for backward compat
+        meta_path = DETECTIONS_DIR / f"{det_id}.json"
+        with open(meta_path, "w") as f:
+            json.dump(details if details else [{"class": label, "confidence": confidence}], f)
 
     def on_motion(self, client, userdata, msg):
         """Handle motion event - grab frame from RTSP live stream."""
         payload = msg.payload.decode("utf-8", errors="ignore").strip()
         if payload.upper() == "ON":
             logger.info("Motion detected! Grabbing live frame...")
-            # Camera is recording = RTSP stream is active. Grab a frame directly.
             t = threading.Thread(
                 target=self._grab_rtsp_frame,
                 args=(client,),
@@ -309,8 +397,8 @@ class NalaDetector:
         logger.info(f"Confidence threshold: {CONFIDENCE_THRESHOLD}")
         logger.info(f"Notify cooldown: {NOTIFY_COOLDOWN}s")
         logger.info(f"Collecting training data: {COLLECT_DATA}")
+        logger.info(f"SQLite DB: {DB_PATH}")
 
-        # Start the model reload watcher
         self._start_reload_watcher()
 
         self.mqtt_client = mqtt.Client(

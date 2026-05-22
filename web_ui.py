@@ -6,6 +6,7 @@ and manage model versions.
 
 import os
 import json
+import sqlite3
 import shutil
 import subprocess
 import threading
@@ -16,6 +17,7 @@ from flask import Flask, render_template_string, jsonify, request, send_file
 app = Flask(__name__)
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
+DB_PATH = os.path.join(DATA_DIR, "nala.db")
 MODEL_DIR = "/models"
 HISTORY_DIR = os.path.join(MODEL_DIR, "history")
 MANIFEST_PATH = os.path.join(HISTORY_DIR, "manifest.json")
@@ -529,9 +531,15 @@ def get_stats():
                     else:
                         dataset_new += 1
 
-    # Detections
-    det_dir = os.path.join(DATA_DIR, "detections")
-    det_count = len([f for f in os.listdir(det_dir) if f.endswith(".json")]) if os.path.exists(det_dir) else 0
+    # Detections (from SQLite)
+    det_count = 0
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            det_count = conn.execute("SELECT COUNT(*) FROM detections").fetchone()[0]
+            conn.close()
+        except:
+            pass
 
     return jsonify({
         "new_cat": new_cat,
@@ -610,6 +618,19 @@ def move_to_dataset():
         if os.path.exists(src):
             shutil.move(src, dst)
             moved += 1
+            # Update SQLite if DB exists
+            if os.path.exists(DB_PATH):
+                try:
+                    det_id = f.replace(".jpg", "")
+                    conn = sqlite3.connect(DB_PATH, timeout=5)
+                    conn.execute(
+                        "UPDATE detections SET frame_path = ?, in_dataset = 1 WHERE id = ?",
+                        (dst, det_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                except:
+                    pass
     return jsonify({"moved": moved})
 
 
@@ -638,6 +659,19 @@ def relabel_to_dataset():
         if os.path.exists(src):
             shutil.move(src, dst)
             moved += 1
+            # Update SQLite if DB exists
+            if os.path.exists(DB_PATH):
+                try:
+                    det_id = f.replace(".jpg", "")
+                    conn = sqlite3.connect(DB_PATH, timeout=5)
+                    conn.execute(
+                        "UPDATE detections SET frame_path = ?, in_dataset = 1 WHERE id = ?",
+                        (dst, det_id)
+                    )
+                    conn.commit()
+                    conn.close()
+                except:
+                    pass
     return jsonify({"moved": moved})
 
 
@@ -697,55 +731,40 @@ def delete_dataset_images():
 
 @app.route("/api/detections")
 def list_detections():
-    """Return detection log with metadata from .json files."""
+    """Return detection log from SQLite (all events including no_cat)."""
     sort_order = request.args.get('sort', 'newest')
-    det_dir = os.path.join(DATA_DIR, "detections")
-    if not os.path.exists(det_dir):
+    order = "DESC" if sort_order == 'newest' else "ASC"
+
+    if not os.path.exists(DB_PATH):
         return jsonify([])
 
-    json_files = sorted(
-        [f for f in os.listdir(det_dir) if f.endswith(".json")],
-        reverse=(sort_order == 'newest')
-    )
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT id, timestamp, label, confidence, frame_path FROM detections ORDER BY timestamp {order}"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return jsonify([])
 
     results = []
-    for jf in json_files:
-        basename = jf.replace(".json", "")
-        img_file = basename + ".jpg"
-        meta_path = os.path.join(det_dir, jf)
+    for row in rows:
+        det_id = row["id"]
+        # Format timestamp for display
         try:
-            with open(meta_path, "r") as f:
-                meta = json.load(f)
-        except:
-            continue
-
-        # Parse timestamp from filename
-        try:
-            dt = datetime.strptime(basename, "%Y%m%d_%H%M%S")
+            dt = datetime.fromisoformat(row["timestamp"])
             dt_str = dt.strftime("%Y-%m-%d %H:%M:%S")
         except:
-            dt_str = basename
+            dt_str = row["timestamp"]
 
-        # Determine label and confidence
-        if isinstance(meta, list) and len(meta) > 0:
-            entry = meta[0]
-            label = entry.get("class", "unknown")
-            confidence = round(entry.get("confidence", 0) * 100, 1)
-        elif isinstance(meta, dict):
-            label = meta.get("class", "unknown")
-            confidence = round(meta.get("confidence", 0) * 100, 1)
-        else:
-            label = "unknown"
-            confidence = 0
-
-        # Normalize label
-        if label == "cat":
-            label = "nala"
+        confidence = round(row["confidence"] * 100, 1) if row["confidence"] else 0
 
         results.append({
-            "file": img_file,
+            "id": det_id,
+            "file": f"{det_id}.jpg",
             "datetime": dt_str,
-            "label": label,
+            "label": row["label"],
             "confidence": confidence,
         })
 
@@ -762,6 +781,29 @@ def get_detection_image(filename):
         return "not found", 404
     return send_file(filepath, mimetype="image/jpeg")
 
+
+
+
+@app.route("/api/detection-image-by-id/<det_id>")
+def get_detection_image_by_id(det_id):
+    """Serve a detection image by its database ID."""
+    if ".." in det_id:
+        return "invalid", 400
+    if not os.path.exists(DB_PATH):
+        return "not found", 404
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        row = conn.execute("SELECT frame_path FROM detections WHERE id = ?", (det_id,)).fetchone()
+        conn.close()
+        if row and row[0] and os.path.exists(row[0]):
+            return send_file(row[0], mimetype="image/jpeg")
+    except:
+        pass
+    # Fallback to detections dir
+    filepath = os.path.join(DATA_DIR, "detections", f"{det_id}.jpg")
+    if os.path.exists(filepath):
+        return send_file(filepath, mimetype="image/jpeg")
+    return "not found", 404
 
 @app.route("/api/train", methods=["POST"])
 def start_training():

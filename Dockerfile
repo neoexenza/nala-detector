@@ -24,6 +24,7 @@ RUN mkdir -p /models && \
 COPY cat_detector.py /app/cat_detector.py
 COPY train.py /app/train.py
 COPY web_ui.py /app/web_ui.py
+COPY migrate_to_sqlite.py /app/migrate_to_sqlite.py
 
 WORKDIR /app
 
