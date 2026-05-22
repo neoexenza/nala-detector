@@ -13,6 +13,12 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, render_template_string, jsonify, request, send_file
+from PIL import Image as PILImage
+import io as stdlib_io
+
+THUMB_SIZE = (200, 150)
+THUMB_DIR = os.path.join(os.environ.get("DATA_DIR", "/data"), ".thumbs")
+os.makedirs(THUMB_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
@@ -61,6 +67,30 @@ def save_trained_files(files_set):
     with open(TRAINED_FILES_PATH, "w") as f:
         json.dump({"files": sorted(files_set)}, f, indent=2)
 
+
+
+
+def get_or_create_thumb(source_path):
+    """Return path to a cached thumbnail, creating it if needed."""
+    if not source_path or not os.path.exists(source_path):
+        return None
+    # Use hash of source path as cache key
+    import hashlib
+    cache_key = hashlib.md5(source_path.encode()).hexdigest() + ".jpg"
+    thumb_path = os.path.join(THUMB_DIR, cache_key)
+
+    if os.path.exists(thumb_path):
+        # Check if source is newer than thumb
+        if os.path.getmtime(source_path) <= os.path.getmtime(thumb_path):
+            return thumb_path
+
+    try:
+        img = PILImage.open(source_path)
+        img.thumbnail(THUMB_SIZE)
+        img.save(thumb_path, "JPEG", quality=60)
+        return thumb_path
+    except:
+        return None
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -294,7 +324,7 @@ function render() {
   const grid = document.getElementById('grid');
   grid.innerHTML = images.map(f => {
     const sel = selected.has(f) ? 'selected' : '';
-    return `<div class="card ${sel}" onclick="toggle('${f}')"><img src="/api/image/${currentTab}/${f}" loading="lazy"><div class="name">${f}</div></div>`;
+    return `<div class="card ${sel}" onclick="toggle('${f}')"><img src="/api/thumb/training/${currentTab}/${f}" loading="lazy"><div class="name">${f}</div></div>`;
   }).join('');
 }
 
@@ -573,7 +603,7 @@ function renderDatasetGroup(group, prefix) {
     html += pageFiles.map(f => {
       const key = label + '/' + f;
       const sel = datasetSelected.has(key) ? 'selected' : '';
-      return `<div class="card ${sel}" onclick="toggleDatasetItem('${key}')"><img src="/api/dataset-image/${label}/${f}" loading="lazy"><div class="name">${f}</div></div>`;
+      return `<div class="card ${sel}" onclick="toggleDatasetItem('${key}')"><img src="/api/thumb/dataset/${label}/${f}" loading="lazy"><div class="name">${f}</div></div>`;
     }).join('');
     html += '</div>';
     if (totalPages > 1) {
@@ -1186,6 +1216,57 @@ def detection_relabel():
             pass
 
     return jsonify({"success": True, "moved_from": old_label, "moved_to": new_label})
+
+
+
+@app.route("/api/thumb/training/<folder>/<filename>")
+def get_training_thumb(folder, filename):
+    """Serve thumbnail for training image."""
+    if folder not in FOLDERS or ".." in filename:
+        return "not found", 404
+    source = os.path.join(FOLDERS[folder], filename)
+    thumb = get_or_create_thumb(source)
+    if thumb:
+        return send_file(thumb, mimetype="image/jpeg")
+    return get_image(folder, filename)
+
+
+@app.route("/api/thumb/dataset/<label>/<filename>")
+def get_dataset_thumb(label, filename):
+    """Serve thumbnail for dataset image."""
+    if label not in ["nala", "other_cat", "no_cat"] or ".." in filename:
+        return "not found", 404
+    source = os.path.join(DATASET_DIR, label, filename)
+    thumb = get_or_create_thumb(source)
+    if thumb:
+        return send_file(thumb, mimetype="image/jpeg")
+    return get_dataset_image(label, filename)
+
+
+@app.route("/api/thumb/detection/<det_id>")
+def get_detection_thumb(det_id):
+    """Serve thumbnail for detection image."""
+    if ".." in det_id:
+        return "not found", 404
+    # Get frame_path from DB
+    source = None
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            row = conn.execute("SELECT frame_path FROM detections WHERE id = ?", (det_id,)).fetchone()
+            conn.close()
+            if row and row[0]:
+                source = row[0]
+        except:
+            pass
+    if not source:
+        source = os.path.join(DATA_DIR, "detections", f"{det_id}.jpg")
+    thumb = get_or_create_thumb(source)
+    if thumb:
+        return send_file(thumb, mimetype="image/jpeg")
+    if os.path.exists(source):
+        return send_file(source, mimetype="image/jpeg")
+    return "not found", 404
 
 
 @app.route("/api/train", methods=["POST"])
