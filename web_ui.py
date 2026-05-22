@@ -551,21 +551,47 @@ function renderDataset() {
   container.innerHTML = html;
 }
 
+const DS_PAGE_SIZE = 10;
+let dsPages = {};  // key: "new_nala", "trained_no_cat" etc -> current page (1-based)
+
+function getDsPageKey(prefix, label) { return prefix + '_' + label; }
+
 function renderDatasetGroup(group, prefix) {
   let html = '';
   for (const label of ['nala', 'other_cat', 'no_cat']) {
     const files = group[label] || [];
     if (files.length === 0) continue;
     const labelName = label === 'nala' ? 'Nala' : label === 'other_cat' ? 'Other Cat' : 'No Cat';
-    html += '<div class="dataset-group"><h3 class="' + label + '">' + labelName + ' (' + files.length + ')</h3><div class="grid">';
-    html += files.map(f => {
+    const pageKey = getDsPageKey(prefix, label);
+    const page = dsPages[pageKey] || 1;
+    const totalPages = Math.max(1, Math.ceil(files.length / DS_PAGE_SIZE));
+    const start = (page - 1) * DS_PAGE_SIZE;
+    const pageFiles = files.slice(start, start + DS_PAGE_SIZE);
+
+    html += '<div class="dataset-group"><h3 class="' + label + '">' + labelName + ' (' + files.length + ')</h3>';
+    html += '<div class="grid">';
+    html += pageFiles.map(f => {
       const key = label + '/' + f;
       const sel = datasetSelected.has(key) ? 'selected' : '';
       return `<div class="card ${sel}" onclick="toggleDatasetItem('${key}')"><img src="/api/dataset-image/${label}/${f}" loading="lazy"><div class="name">${f}</div></div>`;
     }).join('');
-    html += '</div></div>';
+    html += '</div>';
+    if (totalPages > 1) {
+      html += `<div class="det-pagination" style="margin-top:0.5rem;margin-bottom:0.5rem;">`;
+      html += `<button class="btn btn-small" onclick="dsPageNav('${pageKey}',-1)" ${page<=1?'disabled':''}>← Prev</button>`;
+      html += `<span class="det-page-info">Page ${page} / ${totalPages}</span>`;
+      html += `<button class="btn btn-small" onclick="dsPageNav('${pageKey}',1)" ${page>=totalPages?'disabled':''}>Next →</button>`;
+      html += `</div>`;
+    }
+    html += '</div>';
   }
   return html;
+}
+
+function dsPageNav(pageKey, dir) {
+  const current = dsPages[pageKey] || 1;
+  dsPages[pageKey] = current + dir;
+  renderDataset();
 }
 
 function toggleDatasetItem(key) { datasetSelected.has(key) ? datasetSelected.delete(key) : datasetSelected.add(key); renderDataset(); }
