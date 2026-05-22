@@ -1021,22 +1021,37 @@ def get_detection_info(det_id):
     # Check if file is in any dataset folder (and which label)
     trained_files = get_trained_files()
     filename = f"{det_id}.jpg"
-    for label in ["nala", "other_cat", "no_cat"]:
-        label_dir = os.path.join(DATASET_DIR, label)
-        filepath = os.path.join(label_dir, filename)
-        if os.path.exists(filepath):
-            info["in_dataset"] = True
-            info["dataset_label"] = label
-            if filename in trained_files:
-                info["trained"] = True
+    # Also check original filename from frame_path
+    original_filename = None
+    if info.get("frame_path"):
+        original_filename = os.path.basename(info["frame_path"])
+
+    filenames_to_check = [filename]
+    if original_filename and original_filename != filename:
+        filenames_to_check.append(original_filename)
+
+    for fname in filenames_to_check:
+        for label in ["nala", "other_cat", "no_cat"]:
+            label_dir = os.path.join(DATASET_DIR, label)
+            filepath = os.path.join(label_dir, fname)
+            if os.path.exists(filepath):
+                info["in_dataset"] = True
+                info["dataset_label"] = label
+                if fname in trained_files:
+                    info["trained"] = True
+                break
+        if info["dataset_label"]:
             break
 
     # If not found in dataset, check training folders
-    if not info["in_dataset"]:
-        for folder_key, folder_path in FOLDERS.items():
-            filepath = os.path.join(folder_path, filename)
-            if os.path.exists(filepath):
-                info["dataset_label"] = FOLDER_TO_LABEL[folder_key]
+    if not info["in_dataset"] and not info["dataset_label"]:
+        for fname in filenames_to_check:
+            for folder_key, folder_path in FOLDERS.items():
+                filepath = os.path.join(folder_path, fname)
+                if os.path.exists(filepath):
+                    info["dataset_label"] = FOLDER_TO_LABEL[folder_key]
+                    break
+            if info["dataset_label"]:
                 break
 
     return jsonify(info)
