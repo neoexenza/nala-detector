@@ -139,6 +139,35 @@ h1 { margin-bottom: 0.5rem; }
 .dataset-group h3.nala { color: #e94560; }
 .dataset-group h3.other_cat { color: #533483; }
 .dataset-group h3.no_cat { color: #888; }
+
+/* Detection Modal */
+.modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }
+.modal-overlay.visible { display: flex; }
+.modal { background: #1a1a2e; border: 1px solid #0f3460; border-radius: 8px; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+.modal-header { padding: 0.75rem 1rem; border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center; }
+.modal-header h3 { font-size: 0.9rem; color: #ccc; }
+.modal-close { background: none; border: none; color: #e94560; font-size: 1.5rem; cursor: pointer; padding: 0 0.5rem; }
+.modal-body { display: flex; align-items: center; position: relative; flex: 1; min-height: 0; }
+.modal-img-container { flex: 1; display: flex; justify-content: center; align-items: center; padding: 0.5rem; overflow: hidden; }
+.modal-img-container img { max-width: 100%; max-height: 60vh; object-fit: contain; border-radius: 4px; }
+.modal-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(15,52,96,0.8); border: 1px solid #0f3460; color: #eee; font-size: 1.5rem; padding: 0.5rem 0.75rem; cursor: pointer; border-radius: 4px; z-index: 10; }
+.modal-nav:hover { background: #0f3460; border-color: #e94560; }
+.modal-nav.left { left: 0.5rem; }
+.modal-nav.right { right: 0.5rem; }
+.modal-nav:disabled { opacity: 0.3; cursor: not-allowed; }
+.modal-footer { padding: 0.75rem 1rem; border-top: 1px solid #0f3460; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; justify-content: center; }
+.modal-label-btn { padding: 0.5rem 1rem; border: 2px solid #333; border-radius: 4px; cursor: pointer; font-size: 0.85rem; background: #16213e; color: #eee; transition: all 0.15s; }
+.modal-label-btn:hover:not(:disabled) { border-color: #e94560; }
+.modal-label-btn.active { border-color: #e94560; background: #0f3460; }
+.modal-label-btn.nala-btn.active { border-color: #e94560; background: #3a1020; }
+.modal-label-btn.other-cat-btn.active { border-color: #533483; background: #2a1848; }
+.modal-label-btn.no-cat-btn.active { border-color: #888; background: #2a2a2a; }
+.modal-label-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.modal-action-btn { padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; margin-left: 0.5rem; }
+.modal-action-btn.move { background: #2d6a4f; color: #fff; }
+.modal-action-btn.update { background: #b8860b; color: #fff; }
+.modal-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.modal-status { font-size: 0.75rem; color: #888; width: 100%; text-align: center; margin-top: 0.25rem; }
 </style>
 </head>
 <body>
@@ -328,10 +357,10 @@ function renderDetections() {
   if (total === 0) {
     list.innerHTML = '<div class="no-items">No detections recorded yet.</div>';
   } else {
-    list.innerHTML = page.map(d => {
+    list.innerHTML = page.map((d, i) => {
       const lc = d.label === 'nala' ? 'nala' : d.label === 'other_cat' ? 'other_cat' : 'no_cat';
       const lt = d.label === 'nala' ? 'Nala' : d.label === 'other_cat' ? 'Other Cat' : d.label;
-      return `<div class="det-row" onclick="goToDetection('${d.file}','${d.label}')"><span class="det-date">${d.datetime}</span><span class="det-label ${lc}">${lt}</span><span class="det-confidence">${d.confidence}%</span></div>`;
+      return `<div class="det-row" onclick="openModal(${start + i})"><span class="det-date">${d.datetime}</span><span class="det-label ${lc}">${lt}</span><span class="det-confidence">${d.confidence}%</span></div>`;
     }).join('');
   }
   document.getElementById('det-page-info').textContent = 'Page ' + detPage + ' / ' + totalPages + ' (' + total + ' total)';
@@ -342,19 +371,146 @@ function renderDetections() {
 function detPrev() { if (detPage > 1) { detPage--; renderDetections(); } }
 function detNext() { if (detPage < Math.ceil(detections.length / DET_PAGE_SIZE)) { detPage++; renderDetections(); } }
 
+// --- Detection Modal ---
+let modalIndex = -1;
+let modalSelectedLabel = null;
+let modalDetection = null;  // current detection data from API
+
+function openModal(index) {
+  modalIndex = index;
+  modalSelectedLabel = null;
+  const overlay = document.getElementById('det-modal');
+  overlay.classList.add('visible');
+  loadModalDetection();
+  document.addEventListener('keydown', modalKeyHandler);
+}
+
+function closeModal() {
+  document.getElementById('det-modal').classList.remove('visible');
+  document.removeEventListener('keydown', modalKeyHandler);
+}
+
+function modalKeyHandler(e) {
+  if (e.key === 'Escape') closeModal();
+  else if (e.key === 'ArrowLeft') modalNav(-1);
+  else if (e.key === 'ArrowRight') modalNav(1);
+}
+
+function modalNav(dir) {
+  const newIdx = modalIndex + dir;
+  if (newIdx < 0 || newIdx >= detections.length) return;
+  modalIndex = newIdx;
+  modalSelectedLabel = null;
+  loadModalDetection();
+}
+
+async function loadModalDetection() {
+  const det = detections[modalIndex];
+  if (!det) return;
+
+  // Fetch full info from API
+  const r = await fetch('/api/detection/' + det.id);
+  modalDetection = await r.json();
+
+  // Update image
+  document.getElementById('modal-img').src = '/api/detection-image-by-id/' + det.id;
+
+  // Title: timestamp — label confidence%
+  const labelDisplay = det.label === 'nala' ? 'Nala' : det.label === 'other_cat' ? 'Other Cat' : det.label;
+  const confStr = det.confidence ? ' ' + det.confidence + '%' : '';
+  document.getElementById('modal-title').textContent = det.datetime + ' — ' + labelDisplay + confStr;
+
+  // Nav buttons
+  document.getElementById('modal-prev').disabled = modalIndex <= 0;
+  document.getElementById('modal-next').disabled = modalIndex >= detections.length - 1;
+
+  // Label buttons state
+  const isTrained = modalDetection.trained;
+  const inDataset = modalDetection.in_dataset;
+  const currentLabel = modalDetection.dataset_label || det.label;
+
+  ['nala', 'other_cat', 'no_cat'].forEach(lbl => {
+    const btn = document.getElementById('mlbl-' + lbl);
+    btn.disabled = isTrained;
+    btn.classList.toggle('active', lbl === currentLabel && !modalSelectedLabel || lbl === modalSelectedLabel);
+  });
+
+  // If trained, pre-select current and disable
+  if (isTrained) {
+    modalSelectedLabel = currentLabel;
+    document.getElementById('modal-status').textContent = 'Already used for training — locked';
+  } else if (inDataset) {
+    modalSelectedLabel = currentLabel;
+    document.getElementById('modal-status').textContent = 'In dataset as: ' + currentLabel;
+  } else {
+    modalSelectedLabel = det.label;
+    document.getElementById('modal-status').textContent = '';
+  }
+
+  // Highlight correct button
+  ['nala', 'other_cat', 'no_cat'].forEach(lbl => {
+    document.getElementById('mlbl-' + lbl).classList.toggle('active', lbl === modalSelectedLabel);
+  });
+
+  updateModalActions();
+}
+
+function modalSelectLabel(lbl) {
+  if (modalDetection && modalDetection.trained) return;
+  modalSelectedLabel = lbl;
+  ['nala', 'other_cat', 'no_cat'].forEach(l => {
+    document.getElementById('mlbl-' + l).classList.toggle('active', l === lbl);
+  });
+  updateModalActions();
+}
+
+function updateModalActions() {
+  const moveBtn = document.getElementById('modal-move-btn');
+  const updateBtn = document.getElementById('modal-update-btn');
+  moveBtn.style.display = 'none';
+  updateBtn.style.display = 'none';
+
+  if (!modalDetection || modalDetection.trained) return;
+
+  if (!modalDetection.in_dataset) {
+    // Not in dataset — show "Move to Dataset"
+    moveBtn.style.display = 'inline-block';
+  } else {
+    // In dataset — if label changed, show "Update Dataset"
+    if (modalSelectedLabel && modalSelectedLabel !== modalDetection.dataset_label) {
+      updateBtn.style.display = 'inline-block';
+    }
+  }
+}
+
+async function modalMoveToDataset() {
+  if (!modalDetection || !modalSelectedLabel) return;
+  const det = detections[modalIndex];
+  await fetch('/api/detection-to-dataset', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: det.id, label: modalSelectedLabel})
+  });
+  await loadModalDetection();
+  refreshStats();
+}
+
+async function modalUpdateDataset() {
+  if (!modalDetection || !modalSelectedLabel) return;
+  const det = detections[modalIndex];
+  await fetch('/api/detection-relabel', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: det.id, new_label: modalSelectedLabel})
+  });
+  await loadModalDetection();
+  refreshStats();
+}
+
 function goToDetection(file, label) {
-  let tab = 'cat';
-  if (label === 'other_cat') tab = 'other_cat';
-  else if (label === 'no_cat') tab = 'no_cat';
-  currentTab = tab;
-  selected.clear();
-  selected.add(file);
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-  document.getElementById('images-container').classList.remove('hidden');
-  document.getElementById('detections-container').classList.remove('visible');
-  document.getElementById('dataset-container').classList.remove('visible');
-  document.getElementById('models-container').classList.remove('visible');
-  load();
+  // Find index in detections array
+  const idx = detections.findIndex(d => d.file === file);
+  if (idx >= 0) openModal(idx);
 }
 
 // --- Dataset ---
@@ -499,6 +655,31 @@ async function rollbackGeneric() {
 // Init
 load();
 </script>
+
+<!-- Detection Modal -->
+<div class="modal-overlay" id="det-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Detection</h3>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <button class="modal-nav left" id="modal-prev" onclick="modalNav(-1)">&#8249;</button>
+      <div class="modal-img-container">
+        <img id="modal-img" src="" alt="detection frame">
+      </div>
+      <button class="modal-nav right" id="modal-next" onclick="modalNav(1)">&#8250;</button>
+    </div>
+    <div class="modal-footer">
+      <button class="modal-label-btn nala-btn" id="mlbl-nala" onclick="modalSelectLabel('nala')">Nala</button>
+      <button class="modal-label-btn other-cat-btn" id="mlbl-other_cat" onclick="modalSelectLabel('other_cat')">Other Cat</button>
+      <button class="modal-label-btn no-cat-btn" id="mlbl-no_cat" onclick="modalSelectLabel('no_cat')">No Cat</button>
+      <button class="modal-action-btn move" id="modal-move-btn" onclick="modalMoveToDataset()" style="display:none">Move to Dataset</button>
+      <button class="modal-action-btn update" id="modal-update-btn" onclick="modalUpdateDataset()" style="display:none">Update Dataset</button>
+      <div class="modal-status" id="modal-status"></div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
 """
@@ -804,6 +985,167 @@ def get_detection_image_by_id(det_id):
     if os.path.exists(filepath):
         return send_file(filepath, mimetype="image/jpeg")
     return "not found", 404
+
+
+@app.route("/api/detection/<det_id>")
+def get_detection_info(det_id):
+    """Return full detection info including dataset/trained status."""
+    if ".." in det_id:
+        return jsonify({"error": "invalid"}), 400
+
+    info = {
+        "id": det_id,
+        "in_dataset": False,
+        "trained": False,
+        "dataset_label": None,
+        "frame_path": None,
+    }
+
+    # Check SQLite
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            row = conn.execute(
+                "SELECT label, confidence, frame_path, in_dataset FROM detections WHERE id = ?",
+                (det_id,)
+            ).fetchone()
+            conn.close()
+            if row:
+                info["label"] = row[0]
+                info["confidence"] = row[1]
+                info["frame_path"] = row[2]
+                info["in_dataset"] = bool(row[3])
+        except:
+            pass
+
+    # Check if file is in any dataset folder (and which label)
+    trained_files = get_trained_files()
+    filename = f"{det_id}.jpg"
+    for label in ["nala", "other_cat", "no_cat"]:
+        label_dir = os.path.join(DATASET_DIR, label)
+        filepath = os.path.join(label_dir, filename)
+        if os.path.exists(filepath):
+            info["in_dataset"] = True
+            info["dataset_label"] = label
+            if filename in trained_files:
+                info["trained"] = True
+            break
+
+    # If not found in dataset, check training folders
+    if not info["in_dataset"]:
+        for folder_key, folder_path in FOLDERS.items():
+            filepath = os.path.join(folder_path, filename)
+            if os.path.exists(filepath):
+                info["dataset_label"] = FOLDER_TO_LABEL[folder_key]
+                break
+
+    return jsonify(info)
+
+
+@app.route("/api/detection-to-dataset", methods=["POST"])
+def detection_to_dataset():
+    """Move a detection frame directly to the dataset under a chosen label."""
+    data = request.json
+    det_id = data.get("id")
+    label = data.get("label")
+
+    if not det_id or not label or label not in ["nala", "other_cat", "no_cat"]:
+        return jsonify({"error": "invalid params"}), 400
+
+    filename = f"{det_id}.jpg"
+    dst_dir = os.path.join(DATASET_DIR, label)
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, filename)
+
+    # Find the source file - check training folders first, then detections
+    src = None
+    src_folder = None
+    for folder_key, folder_path in FOLDERS.items():
+        candidate = os.path.join(folder_path, filename)
+        if os.path.exists(candidate):
+            src = candidate
+            src_folder = folder_key
+            break
+
+    if not src:
+        # Try detections directory
+        candidate = os.path.join(DATA_DIR, "detections", filename)
+        if os.path.exists(candidate):
+            src = candidate
+
+    if not src:
+        return jsonify({"error": "source file not found"}), 404
+
+    # Copy (not move from detections, move from training)
+    if src_folder:
+        shutil.move(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+    # Update SQLite
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            conn.execute(
+                "UPDATE detections SET frame_path = ?, in_dataset = 1, label = ? WHERE id = ?",
+                (dst, label, det_id)
+            )
+            conn.commit()
+            conn.close()
+        except:
+            pass
+
+    return jsonify({"success": True, "moved_to": label})
+
+
+@app.route("/api/detection-relabel", methods=["POST"])
+def detection_relabel():
+    """Move a detection from one dataset label folder to another."""
+    data = request.json
+    det_id = data.get("id")
+    new_label = data.get("new_label")
+
+    if not det_id or not new_label or new_label not in ["nala", "other_cat", "no_cat"]:
+        return jsonify({"error": "invalid params"}), 400
+
+    filename = f"{det_id}.jpg"
+
+    # Find current location in dataset
+    src = None
+    old_label = None
+    for label in ["nala", "other_cat", "no_cat"]:
+        candidate = os.path.join(DATASET_DIR, label, filename)
+        if os.path.exists(candidate):
+            src = candidate
+            old_label = label
+            break
+
+    if not src:
+        return jsonify({"error": "not found in dataset"}), 404
+
+    if old_label == new_label:
+        return jsonify({"success": True, "note": "already correct label"})
+
+    dst_dir = os.path.join(DATASET_DIR, new_label)
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, filename)
+    shutil.move(src, dst)
+
+    # Update SQLite
+    if os.path.exists(DB_PATH):
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            conn.execute(
+                "UPDATE detections SET frame_path = ?, label = ? WHERE id = ?",
+                (dst, new_label, det_id)
+            )
+            conn.commit()
+            conn.close()
+        except:
+            pass
+
+    return jsonify({"success": True, "moved_from": old_label, "moved_to": new_label})
+
 
 @app.route("/api/train", methods=["POST"])
 def start_training():
