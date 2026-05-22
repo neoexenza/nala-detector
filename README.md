@@ -10,6 +10,24 @@ Cat detection system using YOLOv8 + MQTT. Designed for Ring camera snapshots del
 4. Result published to MQTT result topic
 5. Home Assistant (or any MQTT consumer) can trigger notifications
 
+## SQLite Backend
+
+All detection events are stored in `data/nala.db` (WAL mode for concurrent access):
+
+```sql
+CREATE TABLE detections (
+    id          TEXT PRIMARY KEY,  -- YYYYMMDD_N (incremental per day)
+    timestamp   TEXT NOT NULL,     -- ISO 8601
+    label       TEXT NOT NULL,     -- nala, other_cat, no_cat
+    confidence  REAL,              -- 0.0-1.0 (NULL for no detection)
+    frame_path  TEXT,              -- current file location (survives moves)
+    in_dataset  INTEGER DEFAULT 0,
+    notified    INTEGER DEFAULT 0
+);
+```
+
+Frame paths are updated when images move between training/dataset folders, so references never break.
+
 ## Setup
 
 ```bash
@@ -37,12 +55,27 @@ Access at **http://\<host\>:5151**
 
 The web UI provides a complete interface for managing training data and models.
 
+### Detections (default tab)
+
+- **All events:** Every motion trigger is logged (cat + no_cat), not just positives
+- **Modal view:** Click any detection to open a fullscreen modal with the frame image
+- **Label & curate:** Three label buttons (Nala / Other Cat / No Cat) + "Move to Dataset" in one click
+- **Navigation:** Arrow keys or on-screen buttons to browse detections without closing the modal
+- **Smart state:** Already-trained images show as locked; dataset images can be relabelled in-place
+- **Pagination:** 30 detections per page with prev/next navigation
+
 ### Training Data Management
 
 - **Tabs:** Browse images sorted into Nala / Other Cat / No Cat categories
 - **Move:** Select images and move them between categories (e.g. re-classify a mislabelled image)
 - **Delete:** Remove bad/blurry images that would hurt training
 - **Select All / Deselect All:** Bulk operations for large batches
+
+### Dataset
+
+- **Paginated:** Each label group shows 10 images per page
+- **Sections:** Split into "New — pending training" and "Trained" groups
+- **Bulk select:** Select across labels for batch delete
 
 ### Training
 
@@ -67,10 +100,12 @@ The detector checks for model updates every 30 seconds. When a new model is depl
 
 ## Data directories
 
+- `data/nala.db` — SQLite database (WAL mode) tracking all detection events
 - `data/training/cat/` — confirmed Nala frames (auto-collected + manually sorted)
 - `data/training/other_cat/` — other neighbourhood cats (for multi-class training)
 - `data/training/no_cat/` — non-cat frames (empty terrace, people, foxes, etc.)
-- `data/detections/` — confirmed cat detections with metadata
+- `data/detections/` — all detection frames (cat + no_cat) with JSON metadata
+- `data/dataset/train/` — curated training dataset (nala / other_cat / no_cat)
 - `models/yolov8n.pt` — base pre-trained detection model
 - `models/yolov8n-cls.pt` — base classification model (downloaded on first training)
 - `models/nala_custom.pt` — currently active fine-tuned model
@@ -119,7 +154,8 @@ See `.env.example` for all available options.
   "detected": true,
   "confidence": 0.87,
   "detections": [{"class": "nala", "confidence": 0.87}],
-  "timestamp": "20260519_134500",
+  "id": "20260522_5",
+  "timestamp": "2026-05-22T13:45:00",
   "notify": true
 }
 ```
