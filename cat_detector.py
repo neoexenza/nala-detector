@@ -225,7 +225,7 @@ class NalaDetector:
                     "-q:v", "2",
                     "/tmp/motion_frame.jpg"
                 ],
-                capture_output=True, timeout=15
+                capture_output=True, timeout=10
             )
             if result.returncode == 0 and os.path.exists("/tmp/motion_frame.jpg"):
                 with open("/tmp/motion_frame.jpg", "rb") as f:
@@ -242,7 +242,7 @@ class NalaDetector:
 
         # Fallback: request on-demand snapshot after recording finishes
         logger.info("Falling back to on-demand snapshot (waiting for recording to end)...")
-        time.sleep(25)
+        time.sleep(5)
         client.publish(SNAPSHOT_REQUEST_TOPIC, "PRESS")
 
     def _process_frame(self, client, image_bytes):
