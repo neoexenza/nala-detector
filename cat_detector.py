@@ -102,18 +102,22 @@ def init_db():
 def get_next_id(conn):
     """Get the next incremental ID for today: YYYYMMDD_N."""
     today = datetime.now().strftime("%Y%m%d")
-    row = conn.execute(
-        "SELECT id FROM detections WHERE id LIKE ? ORDER BY id DESC LIMIT 1",
+    rows = conn.execute(
+        "SELECT id FROM detections WHERE id LIKE ?",
         (f"{today}_%",)
-    ).fetchone()
-    if row:
-        try:
-            seq = int(row[0].split("_", 1)[1]) + 1
-        except (ValueError, IndexError):
-            seq = 1
+    ).fetchall()
+    if rows:
+        max_seq = 0
+        for row in rows:
+            try:
+                seq = int(row[0].split("_", 1)[1])
+                if seq > max_seq:
+                    max_seq = seq
+            except (ValueError, IndexError):
+                pass
+        return f"{today}_{max_seq + 1}"
     else:
-        seq = 1
-    return f"{today}_{seq}"
+        return f"{today}_1"
 
 
 class NalaDetector:
@@ -351,8 +355,8 @@ class NalaDetector:
             })
             client.publish(RESULT_TOPIC, result_payload, retain=True)
 
-        # Save to SQLite
-        self.save_to_db(det_id, timestamp_iso, label, confidence if is_cat else None, frame_path, notified)
+        # Save to SQLite — always store confidence (even for below-threshold detections)
+        self.save_to_db(det_id, timestamp_iso, label, confidence if confidence else None, frame_path, notified)
 
         # Also save legacy JSON for backward compat
         meta_path = DETECTIONS_DIR / f"{det_id}.json"

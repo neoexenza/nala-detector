@@ -1122,7 +1122,7 @@ def detection_to_dataset():
     os.makedirs(dst_dir, exist_ok=True)
     dst = os.path.join(dst_dir, filename)
 
-    # Find the source file - check training folders first, then detections
+    # Find the source file - check training folders first, then detections, then DB frame_path
     src = None
     src_folder = None
     for folder_key, folder_path in FOLDERS.items():
@@ -1139,9 +1139,21 @@ def detection_to_dataset():
             src = candidate
 
     if not src:
+        # Fallback: check frame_path from DB (handles old-format filenames)
+        if os.path.exists(DB_PATH):
+            try:
+                conn = sqlite3.connect(DB_PATH, timeout=5)
+                row = conn.execute("SELECT frame_path FROM detections WHERE id = ?", (det_id,)).fetchone()
+                conn.close()
+                if row and row[0] and os.path.exists(row[0]):
+                    src = row[0]
+            except:
+                pass
+
+    if not src:
         return jsonify({"error": "source file not found"}), 404
 
-    # Copy (not move from detections, move from training)
+    # Copy (not move from detections or DB path, move from training)
     if src_folder:
         shutil.move(src, dst)
     else:
